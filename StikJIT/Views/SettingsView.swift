@@ -6,19 +6,19 @@
 import SwiftUI
 import UIKit
 
-struct SettingsView: View {
+private enum SettingsLinks {
+    static let githubStars = URL(string: "https://github.com/StephenDev0/StikDebug/stargazers")!
+    static let pairingFileGuide = URL(string: "https://github.com/StephenDev0/StikDebug-Guide/blob/main/pairing_file.md")!
+    static let localDevVPN = URL(string: "https://apps.apple.com/us/app/localdevvpn/id6755608044")!
+    static let discord = URL(string: "https://discord.gg/qahjXNTDwS")!
+}
 
-    @AppStorage("selectedAppIcon") private var selectedAppIcon: String = "AppIcon"
-    @AppStorage("enableAdvancedOptions") private var enableAdvancedOptions = false
-    @AppStorage("enableAdvancedBetaOptions") private var enableAdvancedBetaOptions = false
-    @AppStorage("enableTesting") private var enableTesting = false
+struct SettingsView: View {
     @AppStorage(UserDefaults.Keys.txmOverride) private var overrideTXMDetection = false
     @AppStorage("keepAliveAudio") private var keepAliveAudio = true
     @AppStorage("keepAliveLocation") private var keepAliveLocation = true
     @AppStorage("customTargetIP") private var customTargetIP = ""
-    @AppStorage(TabConfiguration.storageKey) private var enabledTabIdentifiers = TabConfiguration.defaultRawValue
-    @AppStorage("primaryTabSelection") private var tabSelection = TabConfiguration.defaultIDs.first ?? "home"
-    
+
     @State private var isShowingPairingFilePicker = false
     @State private var isImportingFile = false
     @State private var pairingImportMessage: (text: String, isError: Bool)?
@@ -28,37 +28,14 @@ struct SettingsView: View {
     @State private var ddiStatusMessage: String = ""
     @State private var ddiResultMessage: (text: String, isError: Bool)?
 
-
     private var appVersion: String {
         let marketingVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
         return marketingVersion
-    }
-    
-    struct TabOption: Identifiable {
-        let id: String
-        let title: String
-        let detail: String
-        let icon: String
-        let isBeta: Bool
-    }
-    
-    private var tabOptions: [TabOption] {
-        var options: [TabOption] = [
-            TabOption(id: "home", title: "Home", detail: "Dashboard overview", icon: "house", isBeta: false),
-            TabOption(id: "scripts", title: "Scripts", detail: "Manage automation scripts", icon: "scroll", isBeta: false),
-            TabOption(id: "tools", title: "Tools", detail: "Access additional tools", icon: "wrench.and.screwdriver", isBeta: false)
-        ]
-        options.append(TabOption(id: "deviceinfo", title: "Device Info", detail: "View detailed device metadata", icon: "iphone.and.arrow.forward", isBeta: false))
-        options.append(TabOption(id: "profiles", title: "App Expiry", detail: "Check app expiration date, install/remove profiles", icon: "calendar.badge.clock", isBeta: false))
-        options.append(TabOption(id: "processes", title: "Processes", detail: "Inspect running apps", icon: "rectangle.stack.person.crop", isBeta: false))
-        options.append(TabOption(id: "location", title: "Location Sim", detail: "Sideload only", icon: "location", isBeta: false))
-        return options
     }
 
     var body: some View {
         NavigationStack {
             Form {
-                // 1) App Header
                 Section {
                     HStack {
                         Spacer()
@@ -75,14 +52,12 @@ struct SettingsView: View {
                     .padding(.vertical, 8)
                 }
 
-                // 2) GitHub
                 Section {
-                    Link(destination: URL(string: "https://github.com/StephenDev0/StikDebug/stargazers")!) {
+                    Link(destination: SettingsLinks.githubStars) {
                         Label("Star on GitHub", systemImage: "star")
                     }
                 }
 
-                // 3) Pairing File
                 Section("Pairing File") {
                     Button {
                         isShowingPairingFilePicker = true
@@ -109,7 +84,6 @@ struct SettingsView: View {
                     }
                 }
 
-                // 5) Background Keep-Alive
                 Section {
                     Toggle(isOn: $keepAliveAudio) {
                         VStack(alignment: .leading, spacing: 2) {
@@ -138,7 +112,6 @@ struct SettingsView: View {
                     Text("Background Keep-Alive")
                 }
 
-                // 6) Behavior
                 Section("Behavior") {
                     Toggle(isOn: $overrideTXMDetection) {
                         VStack(alignment: .leading, spacing: 2) {
@@ -149,15 +122,14 @@ struct SettingsView: View {
                     }
                 }
 
-                // 7) Advanced
                 Section("Advanced") {
                     HStack {
                         Text("Target Device IP")
                         Spacer()
                         TextField("10.7.0.1", text: $customTargetIP)
-                                .multilineTextAlignment(.trailing)
-                                .keyboardType(.numbersAndPunctuation)
-                                .submitLabel(.done)
+                            .multilineTextAlignment(.trailing)
+                            .keyboardType(.numbersAndPunctuation)
+                            .submitLabel(.done)
                     }
                     Button { openAppFolder() } label: {
                         Label("App Folder", systemImage: "folder")
@@ -175,20 +147,18 @@ struct SettingsView: View {
                     }
                 }
 
-                // 7) Help
                 Section("Help") {
-                    Link(destination: URL(string: "https://github.com/StephenDev0/StikDebug-Guide/blob/main/pairing_file.md")!) {
+                    Link(destination: SettingsLinks.pairingFileGuide) {
                         Label("Pairing File Guide", systemImage: "questionmark.circle")
                     }
-                    Link(destination: URL(string: "https://apps.apple.com/us/app/localdevvpn/id6755608044")!) {
+                    Link(destination: SettingsLinks.localDevVPN) {
                         Label("Download LocalDevVPN", systemImage: "arrow.down.circle")
                     }
-                    Link(destination: URL(string: "https://discord.gg/qahjXNTDwS")!) {
+                    Link(destination: SettingsLinks.discord) {
                         Label("Discord Support", systemImage: "bubble.left.and.bubble.right")
                     }
                 }
 
-                // 8) Version footer
                 Section {
                     Text(versionFooter)
                         .font(.footnote).foregroundStyle(.secondary)
@@ -198,7 +168,7 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
         }
-            .fileImporter(
+        .fileImporter(
             isPresented: $isShowingPairingFilePicker,
             allowedContentTypes: PairingFileStore.supportedContentTypes,
             allowsMultipleSelection: false
@@ -248,7 +218,7 @@ struct SettingsView: View {
         }
         return "Version \(appVersion) • iOS \(UIDevice.current.systemVersion) • \(txmLabel)"
     }
-    
+
     // MARK: - Business Logic
 
     private func openAppFolder() {
@@ -299,7 +269,7 @@ struct SettingsView: View {
             }
         }
     }
-    
+
     private func scheduleDDIStatusDismiss() {
         Task {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
@@ -309,74 +279,5 @@ struct SettingsView: View {
                 }
             }
         }
-    }
-}
-
-// MARK: - Tab Customization
-
-struct TabCustomizationView: View {
-    let tabOptions: [SettingsView.TabOption]
-    @Binding var enabledTabIdentifiers: String
-    @Binding var tabSelection: String
-
-    private var selectedIDs: [String] {
-        TabConfiguration.sanitize(raw: enabledTabIdentifiers)
-    }
-
-    private var pinnedOptions: [SettingsView.TabOption] {
-        selectedIDs.compactMap { id in tabOptions.first(where: { $0.id == id }) }
-    }
-
-    private var availableOptions: [SettingsView.TabOption] {
-        tabOptions.filter { !selectedIDs.contains($0.id) }
-    }
-
-    var body: some View {
-        List {
-            Section {
-                ForEach(pinnedOptions) { option in
-                    HStack {
-                        Label(option.title, systemImage: option.icon)
-                    }
-                }
-                .onMove { indices, newOffset in
-                    var ids = selectedIDs
-                    ids.move(fromOffsets: indices, toOffset: newOffset)
-                    enabledTabIdentifiers = TabConfiguration.serialize(ids)
-                }
-            } header: {
-                Text("Pinned")
-            } footer: {
-                Text("Settings is fixed as the 4th tab.")
-            }
-
-            if !availableOptions.isEmpty {
-                Section("Available") {
-                    ForEach(availableOptions) { option in
-                        Button {
-                            var ids = selectedIDs
-                            guard ids.count < TabConfiguration.maxSelectableTabs else { return }
-                            ids.append(option.id)
-                            enabledTabIdentifiers = TabConfiguration.serialize(ids)
-                        } label: {
-                            HStack {
-                                Label(option.title, systemImage: option.icon)
-                            }
-                        }
-                        .foregroundStyle(.primary)
-                    }
-                }
-            }
-        }
-        .navigationTitle("Tab Bar")
-        .toolbar {
-            EditButton()
-        }
-    }
-}
-
-struct ConsoleLogsView_Preview: PreviewProvider {
-    static var previews: some View {
-        ConsoleLogsView()
     }
 }

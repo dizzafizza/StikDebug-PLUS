@@ -323,6 +323,13 @@ final class ProcessInspectorViewModel: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var controlTimeoutTask: Task<Void, Never>?
     @Published private(set) var lastUpdated: Date?
+
+    private static let relativeDateFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
+
     var filteredProcesses: [ProcessInfoEntry] {
         guard !searchText.isEmpty else { return processes }
         return processes.filter {
@@ -335,9 +342,7 @@ final class ProcessInspectorViewModel: ObservableObject {
     
     var lastUpdatedText: String {
         guard let date = lastUpdated else { return "—" }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: date, relativeTo: Date())
+        return Self.relativeDateFormatter.localizedString(for: date, relativeTo: Date())
     }
     
     func startAutoRefresh() async {

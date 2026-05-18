@@ -149,14 +149,8 @@ struct ConsoleLogsView: View {
                     .padding(.horizontal, 4)
 
                     ForEach(logManager.logs) { logEntry in
-                        Text(AttributedString(createLogAttributedString(logEntry)))
-                            .font(.system(size: 11, design: .monospaced))
-                            .textSelection(.enabled)
-                            .lineLimit(nil)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 1)
-                            .padding(.horizontal, 4)
+                        AppLogRow(logEntry: logEntry, colorScheme: colorScheme)
+                            .equatable()
                             .id(logEntry.id)
                     }
                 }
@@ -219,13 +213,8 @@ struct ConsoleLogsView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
                         ForEach(filteredSyslogEntries) { entry in
-                            Text(AttributedString(createSyslogAttributedString(entry)))
-                                .font(.system(size: 11, design: .monospaced))
-                                .textSelection(.enabled)
-                                .lineLimit(nil)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.vertical, 1)
-                                .padding(.horizontal, 4)
+                            SyslogRow(entry: entry, colorScheme: colorScheme)
+                                .equatable()
                                 .id(entry.id)
                         }
                     }
@@ -292,76 +281,8 @@ struct ConsoleLogsView: View {
         }
     }
     
-    private func createLogAttributedString(_ logEntry: LogManager.LogEntry) -> NSAttributedString {
-        let fullString = NSMutableAttributedString()
-        
-        let timestampString = "[\(formatTime(date: logEntry.timestamp))]"
-        let timestampAttr = NSAttributedString(
-            string: timestampString,
-            attributes: [.foregroundColor: colorScheme == .dark ? UIColor.gray : UIColor.darkGray]
-        )
-        fullString.append(timestampAttr)
-        fullString.append(NSAttributedString(string: " "))
-        
-        let typeString = "[\(logEntry.type.rawValue)]"
-        let typeColor = UIColor(colorForLogType(logEntry.type))
-        let typeAttr = NSAttributedString(
-            string: typeString,
-            attributes: [.foregroundColor: typeColor]
-        )
-        fullString.append(typeAttr)
-        fullString.append(NSAttributedString(string: " "))
-        
-        let messageAttr = NSAttributedString(
-            string: logEntry.message,
-            attributes: [.foregroundColor: colorScheme == .dark ? UIColor.white : UIColor.black]
-        )
-        fullString.append(messageAttr)
-        
-        return fullString
-    }
-
-    private func createSyslogAttributedString(_ entry: SystemLogStream.Entry) -> NSAttributedString {
-        let type = Self.logType(for: entry.raw)
-        let fullString = NSMutableAttributedString()
-
-        let timestampString = "[\(DateFormatter.consoleLogsFormatter.string(from: entry.timestamp))]"
-        fullString.append(NSAttributedString(
-            string: timestampString,
-            attributes: [.foregroundColor: colorScheme == .dark ? UIColor.gray : UIColor.darkGray]
-        ))
-        fullString.append(NSAttributedString(string: " "))
-
-        let typeAttr = NSAttributedString(
-            string: "[\(type.rawValue)]",
-            attributes: [.foregroundColor: UIColor(colorForLogType(type))]
-        )
-        fullString.append(typeAttr)
-        fullString.append(NSAttributedString(string: " "))
-
-        let messageAttr = NSAttributedString(
-            string: entry.raw,
-            attributes: [.foregroundColor: colorScheme == .dark ? UIColor.white : UIColor.black]
-        )
-        fullString.append(messageAttr)
-
-        return fullString
-    }
     private func formatTime(date: Date) -> String {
         DateFormatter.consoleLogsFormatter.string(from: date)
-    }
-    
-    private func colorForLogType(_ type: LogManager.LogEntry.LogType) -> Color {
-        switch type {
-        case .info:
-            return .green
-        case .error:
-            return .red
-        case .debug:
-            return .blue
-        case .warning:
-            return .orange
-        }
     }
 
     nonisolated private static func logType(for line: String) -> LogManager.LogEntry.LogType {
@@ -374,12 +295,6 @@ struct ConsoleLogsView: View {
             return .debug
         } else {
             return .info
-        }
-    }
-
-    private var syslogErrorCount: Int {
-        systemLogStream.entries.reduce(0) { count, entry in
-            count + (Self.logType(for: entry.raw) == .error ? 1 : 0)
         }
     }
 
@@ -566,6 +481,117 @@ struct ConsoleLogsView_Previews: PreviewProvider {
     }
 }
 
+private struct AppLogRow: View, Equatable {
+    let logEntry: LogManager.LogEntry
+    let colorScheme: ColorScheme
+
+    static func == (lhs: AppLogRow, rhs: AppLogRow) -> Bool {
+        lhs.logEntry.id == rhs.logEntry.id && lhs.colorScheme == rhs.colorScheme
+    }
+
+    var body: some View {
+        Text(AttributedString(attributedString))
+            .font(.system(size: 11, design: .monospaced))
+            .textSelection(.enabled)
+            .lineLimit(nil)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 1)
+            .padding(.horizontal, 4)
+    }
+
+    private var attributedString: NSAttributedString {
+        let fullString = NSMutableAttributedString()
+
+        fullString.append(NSAttributedString(
+            string: "[\(DateFormatter.consoleLogsFormatter.string(from: logEntry.timestamp))]",
+            attributes: [.foregroundColor: secondaryTextColor]
+        ))
+        fullString.append(NSAttributedString(string: " "))
+        fullString.append(NSAttributedString(
+            string: "[\(logEntry.type.rawValue)]",
+            attributes: [.foregroundColor: UIColor(logEntry.type.consoleColor)]
+        ))
+        fullString.append(NSAttributedString(string: " "))
+        fullString.append(NSAttributedString(
+            string: logEntry.message,
+            attributes: [.foregroundColor: primaryTextColor]
+        ))
+
+        return fullString
+    }
+
+    private var primaryTextColor: UIColor {
+        colorScheme == .dark ? .white : .black
+    }
+
+    private var secondaryTextColor: UIColor {
+        colorScheme == .dark ? .gray : .darkGray
+    }
+}
+
+private struct SyslogRow: View, Equatable {
+    let entry: SystemLogStream.Entry
+    let colorScheme: ColorScheme
+
+    static func == (lhs: SyslogRow, rhs: SyslogRow) -> Bool {
+        lhs.entry.id == rhs.entry.id && lhs.colorScheme == rhs.colorScheme
+    }
+
+    var body: some View {
+        Text(AttributedString(attributedString))
+            .font(.system(size: 11, design: .monospaced))
+            .textSelection(.enabled)
+            .lineLimit(nil)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 1)
+            .padding(.horizontal, 4)
+    }
+
+    private var attributedString: NSAttributedString {
+        let type = logType(for: entry.raw)
+        let fullString = NSMutableAttributedString()
+
+        fullString.append(NSAttributedString(
+            string: "[\(DateFormatter.consoleLogsFormatter.string(from: entry.timestamp))]",
+            attributes: [.foregroundColor: secondaryTextColor]
+        ))
+        fullString.append(NSAttributedString(string: " "))
+        fullString.append(NSAttributedString(
+            string: "[\(type.rawValue)]",
+            attributes: [.foregroundColor: UIColor(type.consoleColor)]
+        ))
+        fullString.append(NSAttributedString(string: " "))
+        fullString.append(NSAttributedString(
+            string: entry.raw,
+            attributes: [.foregroundColor: primaryTextColor]
+        ))
+
+        return fullString
+    }
+
+    private var primaryTextColor: UIColor {
+        colorScheme == .dark ? .white : .black
+    }
+
+    private var secondaryTextColor: UIColor {
+        colorScheme == .dark ? .gray : .darkGray
+    }
+
+    private func logType(for line: String) -> LogManager.LogEntry.LogType {
+        let lowercase = line.lowercased()
+        if lowercase.contains("error") {
+            return .error
+        } else if lowercase.contains("warning") {
+            return .warning
+        } else if lowercase.contains("debug") {
+            return .debug
+        } else {
+            return .info
+        }
+    }
+}
+
 private enum ConsoleTab: Hashable {
     case idevice
     case syslog
@@ -584,4 +610,19 @@ private extension DateFormatter {
         formatter.dateFormat = "HH:mm:ss"
         return formatter
     }()
+}
+
+private extension LogManager.LogEntry.LogType {
+    var consoleColor: Color {
+        switch self {
+        case .info:
+            return .green
+        case .error:
+            return .red
+        case .debug:
+            return .blue
+        case .warning:
+            return .orange
+        }
+    }
 }

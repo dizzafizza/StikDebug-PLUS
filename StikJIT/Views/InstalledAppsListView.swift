@@ -12,6 +12,45 @@ import Combine
 
 // MARK: - Installed Apps List
 
+struct InstalledAppListItem: Identifiable, Equatable {
+    let bundleID: String
+    let name: String
+    private let normalizedBundleID: String
+    private let normalizedName: String
+
+    var id: String {
+        bundleID
+    }
+
+    init(bundleID: String, name: String) {
+        self.bundleID = bundleID
+        self.name = name
+        self.normalizedBundleID = Self.normalized(bundleID)
+        self.normalizedName = Self.normalized(name)
+    }
+
+    func matches(_ query: String) -> Bool {
+        query.isEmpty || normalizedBundleID.contains(query) || normalizedName.contains(query)
+    }
+
+    static func sorted(from apps: [String: String]) -> [InstalledAppListItem] {
+        apps.map { InstalledAppListItem(bundleID: $0.key, name: $0.value) }
+            .sorted { lhs, rhs in
+                let comparison = lhs.name.localizedCaseInsensitiveCompare(rhs.name)
+                if comparison == .orderedSame {
+                    return lhs.bundleID < rhs.bundleID
+                }
+                return comparison == .orderedAscending
+            }
+    }
+
+    static func normalized(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+    }
+}
+
 struct InstalledAppsListView: View {
     @StateObject private var viewModel = InstalledAppsViewModel()
 
@@ -55,28 +94,17 @@ struct InstalledAppsListView: View {
     }
 
     private var debuggableSearchIsActive: Bool {
-        !debuggableSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !InstalledAppListItem.normalized(debuggableSearchText).isEmpty
     }
 
-    private var debuggableSortedApps: [(key: String, value: String)] {
-        viewModel.debuggableApps.sorted { lhs, rhs in
-            let comparison = lhs.value.localizedCaseInsensitiveCompare(rhs.value)
-            if comparison == .orderedSame {
-                return lhs.key < rhs.key
-            }
-            return comparison == .orderedAscending
-        }
-    }
-
-    private var filteredDebuggableApps: [(key: String, value: String)] {
-        guard debuggableSearchIsActive else { return debuggableSortedApps }
-        let query = normalizedSearchString(debuggableSearchText)
-        guard !query.isEmpty else { return debuggableSortedApps }
-        return debuggableSortedApps.filter { matches(query, bundleID: $0.key, name: $0.value) }
+    private var filteredDebuggableApps: [InstalledAppListItem] {
+        let query = InstalledAppListItem.normalized(debuggableSearchText)
+        guard !query.isEmpty else { return viewModel.debuggableItems }
+        return viewModel.debuggableItems.filter { $0.matches(query) }
     }
 
     private var filteredDebuggableSet: Set<String> {
-        Set(filteredDebuggableApps.map { $0.key })
+        Set(filteredDebuggableApps.map(\.bundleID))
     }
 
     private var filteredFavoriteBundles: [String] {
@@ -87,36 +115,14 @@ struct InstalledAppsListView: View {
         recentApps.filter { filteredDebuggableSet.contains($0) && !favoriteApps.contains($0) }
     }
 
-    // NEW: Combined Launch tab (System + Other/Non-Debuggable)
-    private var combinedLaunchApps: [String: String] {
-        // Prefer names from systemApps when duplicates exist
-        var combined = viewModel.nonDebuggableApps
-        for (k, v) in viewModel.systemApps {
-            combined[k] = v
-        }
-        return combined
-    }
-
-    private var sortedLaunchApps: [(key: String, value: String)] {
-        combinedLaunchApps.sorted { lhs, rhs in
-            let comparison = lhs.value.localizedCaseInsensitiveCompare(rhs.value)
-            if comparison == .orderedSame {
-                return lhs.key < rhs.key
-            }
-            return comparison == .orderedAscending
-        }
-    }
-
     private var launchSearchIsActive: Bool {
-        !launchSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !InstalledAppListItem.normalized(launchSearchText).isEmpty
     }
 
-    private var filteredLaunchApps: [(key: String, value: String)] {
-        let base = sortedLaunchApps
-        guard launchSearchIsActive else { return base }
-        let query = normalizedSearchString(launchSearchText)
-        guard !query.isEmpty else { return base }
-        return base.filter { matches(query, bundleID: $0.key, name: $0.value) }
+    private var filteredLaunchApps: [InstalledAppListItem] {
+        let query = InstalledAppListItem.normalized(launchSearchText)
+        guard !query.isEmpty else { return viewModel.launchItems }
+        return viewModel.launchItems.filter { $0.matches(query) }
     }
 
 private enum AppListTab: Int, CaseIterable, Identifiable {
@@ -139,23 +145,10 @@ private enum AppListTab: Int, CaseIterable, Identifiable {
         let success: Bool
     }
 
-    private func normalizedSearchString(_ text: String) -> String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            .lowercased()
-    }
-
-    private func matches(_ normalizedQuery: String, bundleID: String, name: String) -> Bool {
-        guard !normalizedQuery.isEmpty else { return true }
-        let identifier = normalizedSearchString(bundleID)
-        let displayName = normalizedSearchString(name)
-        return identifier.contains(normalizedQuery) || displayName.contains(normalizedQuery)
-    }
-
     private func isEmpty(for tab: AppListTab) -> Bool {
         switch tab {
         case .debuggable:
-            return viewModel.debuggableApps.isEmpty
+            return viewModel.debuggableItems.isEmpty
         case .launch:
             return filteredLaunchApps.isEmpty
         }
@@ -267,8 +260,8 @@ private enum AppListTab: Int, CaseIterable, Identifiable {
         appendUnique(favoriteApps)
         appendUnique(recentApps)
         appendUnique(pinnedSystemApps)
-        appendUnique(debuggableSortedApps.map { $0.key })
-        appendUnique(sortedLaunchApps.map { $0.key })
+        appendUnique(viewModel.debuggableItems.map(\.bundleID))
+        appendUnique(viewModel.launchItems.map(\.bundleID))
 
         let toPrefetch = priorityIDs.filter { !prefetchedBundleIDs.contains($0) }
         guard !toPrefetch.isEmpty else { return }
@@ -309,7 +302,7 @@ private enum AppListTab: Int, CaseIterable, Identifiable {
                             ForEach(filteredFavoriteBundles, id: \.self) { bundleID in
                                 AppButton(
                                     bundleID: bundleID,
-                                    appName: viewModel.debuggableApps[bundleID] ?? fallbackReadableName(from: bundleID),
+                                    appName: viewModel.displayName(for: bundleID) ?? fallbackReadableName(from: bundleID),
                                     recentApps: $recentApps, favoriteApps: $favoriteApps,
                                     onSelectApp: onSelectApp, sharedDefaults: sharedDefaults, performanceMode: performanceMode
                                 )
@@ -321,7 +314,7 @@ private enum AppListTab: Int, CaseIterable, Identifiable {
                             ForEach(filteredRecentBundles, id: \.self) { bundleID in
                                 AppButton(
                                     bundleID: bundleID,
-                                    appName: viewModel.debuggableApps[bundleID] ?? fallbackReadableName(from: bundleID),
+                                    appName: viewModel.displayName(for: bundleID) ?? fallbackReadableName(from: bundleID),
                                     recentApps: $recentApps, favoriteApps: $favoriteApps,
                                     onSelectApp: onSelectApp, sharedDefaults: sharedDefaults, performanceMode: performanceMode
                                 )
@@ -329,9 +322,9 @@ private enum AppListTab: Int, CaseIterable, Identifiable {
                         }
                     }
                     Section("Apps with get-task-allow".localized) {
-                        ForEach(filteredDebuggableApps, id: \.key) { bundleID, appName in
+                        ForEach(filteredDebuggableApps) { app in
                             AppButton(
-                                bundleID: bundleID, appName: appName,
+                                bundleID: app.bundleID, appName: app.name,
                                 recentApps: $recentApps, favoriteApps: $favoriteApps,
                                 onSelectApp: onSelectApp, sharedDefaults: sharedDefaults, performanceMode: performanceMode
                             )
@@ -366,13 +359,13 @@ private enum AppListTab: Int, CaseIterable, Identifiable {
                     }
                 } else {
                     Section("All Apps".localized) {
-                        ForEach(filteredLaunchApps, id: \.key) { bundleID, appName in
-                            let isPinned = pinnedSystemApps.contains(bundleID)
+                        ForEach(filteredLaunchApps) { app in
+                            let isPinned = pinnedSystemApps.contains(app.bundleID)
                             LaunchAppRow(
-                                bundleID: bundleID, appName: appName,
-                                isLaunching: launchingBundles.contains(bundleID),
+                                bundleID: app.bundleID, appName: app.name,
+                                isLaunching: launchingBundles.contains(app.bundleID),
                                 performanceMode: performanceMode
-                            ) { startLaunching(bundleID: bundleID, appName: appName) }
+                            ) { startLaunching(bundleID: app.bundleID, appName: app.name) }
                             .overlay(alignment: .topTrailing) {
                                 if isPinned {
                                     Image(systemName: "star.fill")
@@ -384,16 +377,16 @@ private enum AppListTab: Int, CaseIterable, Identifiable {
                             .contextMenu {
                                 Button((isPinned ? "Remove from Home" : "Add to Home").localized,
                                        systemImage: isPinned ? "star.slash" : "star") {
-                                    toggleSystemPin(bundleID: bundleID, appName: appName)
+                                    toggleSystemPin(bundleID: app.bundleID, appName: app.name)
                                 }
                                 Button("Copy Bundle ID".localized, systemImage: "doc.on.doc") {
-                                    UIPasteboard.general.string = bundleID
+                                    UIPasteboard.general.string = app.bundleID
                                     Haptics.light()
                                 }
                             }
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                 Button {
-                                    toggleSystemPin(bundleID: bundleID, appName: appName)
+                                    toggleSystemPin(bundleID: app.bundleID, appName: app.name)
                                 } label: {
                                     Label((isPinned ? "Unpin" : "Pin").localized, systemImage: "star")
                                 }
@@ -436,8 +429,7 @@ private enum AppListTab: Int, CaseIterable, Identifiable {
 
         // Persist favorite names for the widget (prefer actual names from lists)
         let computedFavNames: [String: String] = Dictionary(uniqueKeysWithValues: favoriteApps.map { id in
-            let name = viewModel.debuggableApps[id]
-                ?? combinedLaunchApps[id]
+            let name = viewModel.displayName(for: id)
                 ?? fallbackReadableName(from: id)
             return (id, name)
         })
@@ -1020,7 +1012,8 @@ enum AppIconRepository {
     }
 
     private static func loadFromDisk(bundleID: String) async -> UIImage? {
-        await withCheckedContinuation { continuation in
+        let imageScale = await MainActor.run { UIScreen.main.scale }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<UIImage?, Never>) in
             diskQueue.async {
                 guard let url = iconURL(for: bundleID),
                       FileManager.default.fileExists(atPath: url.path) else {
@@ -1032,7 +1025,7 @@ enum AppIconRepository {
                     continuation.resume(returning: nil)
                     return
                 }
-                guard let image = UIImage(data: data, scale: UIScreen.main.scale) else {
+                guard let image = UIImage(data: data, scale: imageScale) else {
                     try? FileManager.default.removeItem(at: url)
                     continuation.resume(returning: nil)
                     return
@@ -1178,6 +1171,8 @@ class InstalledAppsViewModel: ObservableObject {
     @Published var debuggableApps: [String: String] = [:]
     @Published var nonDebuggableApps: [String: String] = [:]
     @Published var systemApps: [String: String] = [:]
+    @Published private(set) var debuggableItems: [InstalledAppListItem] = []
+    @Published private(set) var launchItems: [InstalledAppListItem] = []
     @Published var isLoading = false
     @Published var lastError: String? = nil
 
@@ -1220,9 +1215,7 @@ class InstalledAppsViewModel: ObservableObject {
                 }
 
                 DispatchQueue.main.async {
-                    self.debuggableApps = debuggable
-                    self.nonDebuggableApps = nonDebuggable
-                    self.systemApps = system
+                    self.apply(debuggable: debuggable, nonDebuggable: nonDebuggable, system: system)
                     self.isLoading = false
                     self.cacheApps(debuggable: debuggable, nonDebuggable: nonDebuggable, system: system)
                 }
@@ -1247,10 +1240,28 @@ class InstalledAppsViewModel: ObservableObject {
         let cachedSystem = decode(cacheKeySystem)
 
         if !cachedDebuggable.isEmpty || !cachedNonDebuggable.isEmpty || !cachedSystem.isEmpty {
-            debuggableApps = cachedDebuggable
-            nonDebuggableApps = cachedNonDebuggable
-            systemApps = cachedSystem
+            apply(debuggable: cachedDebuggable, nonDebuggable: cachedNonDebuggable, system: cachedSystem)
         }
+    }
+
+    private func apply(debuggable: [String: String], nonDebuggable: [String: String], system: [String: String]) {
+        debuggableApps = debuggable
+        nonDebuggableApps = nonDebuggable
+        systemApps = system
+        debuggableItems = InstalledAppListItem.sorted(from: debuggable)
+        launchItems = InstalledAppListItem.sorted(from: Self.launchApps(nonDebuggable: nonDebuggable, system: system))
+    }
+
+    private static func launchApps(nonDebuggable: [String: String], system: [String: String]) -> [String: String] {
+        var combined = nonDebuggable
+        for (bundleID, name) in system {
+            combined[bundleID] = name
+        }
+        return combined
+    }
+
+    func displayName(for bundleID: String) -> String? {
+        debuggableApps[bundleID] ?? systemApps[bundleID] ?? nonDebuggableApps[bundleID]
     }
 
     private func cacheApps(debuggable: [String: String], nonDebuggable: [String: String], system: [String: String]) {

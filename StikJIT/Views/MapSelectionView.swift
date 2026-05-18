@@ -747,10 +747,19 @@ struct LocationSimulationView: View {
     @State private var routeStartSelection: RouteSearchSelection?
     @State private var routeEndSelection: RouteSearchSelection?
     @State private var routePlan: RouteSimulationPlan?
+    @State private var routePolyline: MKPolyline?
     @State private var routePlaybackSamples: [RoutePlaybackSample] = []
     @State private var routePlaybackCoordinate: CLLocationCoordinate2D?
     @State private var simulatedCoordinate: CLLocationCoordinate2D?
     @State private var routeRequestID = UUID()
+
+    private static let routeDurationFormatter: DateComponentsFormatter = {
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = [.hour, .minute]
+        formatter.unitsStyle = .abbreviated
+        formatter.zeroFormattingBehavior = .dropAll
+        return formatter
+    }()
 
     // Bookmarks
     @State private var bookmarks: [LocationBookmark] = []
@@ -769,14 +778,6 @@ struct LocationSimulationView: View {
     private var deviceIP: String {
         let stored = UserDefaults.standard.string(forKey: "customTargetIP") ?? ""
         return stored.isEmpty ? "10.7.0.1" : stored
-    }
-
-    private var routePolyline: MKPolyline? {
-        guard let routePlan, routePlan.displayCoordinates.count > 1 else { return nil }
-        return routePlan.displayCoordinates.withUnsafeBufferPointer { buffer in
-            guard let baseAddress = buffer.baseAddress else { return nil }
-            return MKPolyline(coordinates: baseAddress, count: buffer.count)
-        }
     }
 
     private var routeStartCoordinate: CLLocationCoordinate2D? {
@@ -810,11 +811,7 @@ struct LocationSimulationView: View {
             value: routePlan.distance / 1000,
             unit: UnitLength.kilometers
         ).formatted(.measurement(width: .abbreviated, usage: .road))
-        let formatter = DateComponentsFormatter()
-        formatter.allowedUnits = [.hour, .minute]
-        formatter.unitsStyle = .abbreviated
-        formatter.zeroFormattingBehavior = .dropAll
-        let durationText = formatter.string(from: routePlan.expectedTravelTime)
+        let durationText = Self.routeDurationFormatter.string(from: routePlan.expectedTravelTime)
         if let durationText, !durationText.isEmpty {
             return "\(distanceText) • ETA \(durationText)"
         }
@@ -1071,6 +1068,19 @@ struct LocationSimulationView: View {
         newBookmarkName = ""
     }
 
+    private func setRoutePlan(_ plan: RouteSimulationPlan?) {
+        routePlan = plan
+        routePolyline = plan.flatMap { makeRoutePolyline(for: $0.displayCoordinates) }
+    }
+
+    private func makeRoutePolyline(for coordinates: [CLLocationCoordinate2D]) -> MKPolyline? {
+        guard coordinates.count > 1 else { return nil }
+        return coordinates.withUnsafeBufferPointer { buffer in
+            guard let baseAddress = buffer.baseAddress else { return nil }
+            return MKPolyline(coordinates: baseAddress, count: buffer.count)
+        }
+    }
+
     // MARK: - Location
 
     private func selectSearchResult(_ result: MKLocalSearchCompletion) {
@@ -1148,7 +1158,7 @@ struct LocationSimulationView: View {
         routeSpeedPrefetchTask?.cancel()
         routeSpeedPrefetchTask = nil
         routeRequestID = UUID()
-        routePlan = nil
+        setRoutePlan(nil)
         routePlaybackSamples = []
         routePlaybackCoordinate = nil
         isLoadingRoute = false
@@ -1170,11 +1180,11 @@ struct LocationSimulationView: View {
         let fallbackSpeed = RouteSimulationDefaults.importedRouteFallbackSpeedMetersPerSecond
         routeStartSelection = RouteSearchSelection(title: "\(sourceName) Start", coordinate: firstCoordinate)
         routeEndSelection = RouteSearchSelection(title: "\(sourceName) End", coordinate: lastCoordinate)
-        routePlan = RouteSimulationPlan(
+        setRoutePlan(RouteSimulationPlan(
             displayCoordinates: displayCoordinates,
             distance: distance,
             expectedTravelTime: distance / fallbackSpeed
-        )
+        ))
 
         if let routePolyline {
             position = .rect(routePolyline.boundingMapRect)
@@ -1407,7 +1417,7 @@ struct LocationSimulationView: View {
         routeSpeedPrefetchTask?.cancel()
         routeSpeedPrefetchTask = nil
         routeRequestID = UUID()
-        routePlan = nil
+        setRoutePlan(nil)
         routeStartSelection = nil
         routeEndSelection = nil
         routePlaybackSamples = []
@@ -1419,7 +1429,7 @@ struct LocationSimulationView: View {
     private func refreshRoute() {
         routeLoadTask?.cancel()
         routeSpeedPrefetchTask?.cancel()
-        routePlan = nil
+        setRoutePlan(nil)
         routePlaybackSamples = []
 
         guard let routeStart = routeStartSelection?.coordinate,
@@ -1464,7 +1474,7 @@ struct LocationSimulationView: View {
 
                 await MainActor.run {
                     guard routeRequestID == requestID else { return }
-                    self.routePlan = routePlan
+                    self.setRoutePlan(routePlan)
                     isLoadingRoute = false
                     isPrefetchingRouteSpeeds = true
                     if let routePolyline {
