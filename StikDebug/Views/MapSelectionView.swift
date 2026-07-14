@@ -335,7 +335,7 @@ private func fetchRouteSpeedContext(
 
     var components = URLComponents(url: OpenStreetMapSpeedLimitService.endpoint, resolvingAgainstBaseURL: false)
     components?.queryItems = [URLQueryItem(name: "data", value: query)]
-    guard let url = components?.url else { return [] }
+    guard let url = components?.url else { return RouteSpeedContext(ways: [], busStops: []) }
 
     let (data, response) = try await URLSession.shared.data(from: url)
 
