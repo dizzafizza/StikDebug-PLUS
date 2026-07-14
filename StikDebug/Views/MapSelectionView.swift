@@ -373,7 +373,16 @@ private func overpassQuery(for coordinates: [CLLocationCoordinate2D], includeBus
 
     let bbox = String(format: "%.6f,%.6f,%.6f,%.6f", south, west, north, east)
 
-    let busStopClause = includeBusStops ? "\n      node(\(bbox))[highway=bus_stop];" : ""
+    // Bus stops are mapped inconsistently in OSM: the legacy `highway=bus_stop`
+    // tag, and the newer public_transport schema (platform / stop_position with
+    // `bus=yes`). Query all of them so we don't miss most stops in areas that use
+    // the modern tagging.
+    let busStopClause = includeBusStops ? """
+
+      node(\(bbox))[highway=bus_stop];
+      node(\(bbox))[public_transport=platform][bus=yes];
+      node(\(bbox))[public_transport=stop_position][bus=yes];
+    """ : ""
 
     return """
     [out:json][timeout:20];
@@ -384,6 +393,17 @@ private func overpassQuery(for coordinates: [CLLocationCoordinate2D], includeBus
     );
     out tags geom;
     """
+}
+
+private func tagsDescribeBusStop(_ tags: [String: String]) -> Bool {
+    if tags["highway"] == "bus_stop" {
+        return true
+    }
+    let publicTransport = tags["public_transport"]
+    if publicTransport == "platform" || publicTransport == "stop_position" {
+        return tags["bus"] == "yes"
+    }
+    return false
 }
 
 private func fetchRouteSpeedContext(
@@ -427,7 +447,8 @@ private func fetchRouteSpeedContext(
 
     let busStops: [CLLocationCoordinate2D] = decoded.elements.compactMap { element in
         guard let lat = element.lat, let lon = element.lon,
-              element.tags?["highway"] == "bus_stop" else {
+              let tags = element.tags,
+              tagsDescribeBusStop(tags) else {
             return nil
         }
         return CLLocationCoordinate2D(latitude: lat, longitude: lon)
