@@ -52,6 +52,88 @@ private struct RoutePlaybackSample {
     let delayFromPrevious: TimeInterval
 }
 
+enum SpeedProfile: String, CaseIterable, Identifiable {
+    case walking
+    case jogging
+    case cycling
+    case driving
+    case bus
+    case custom
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .walking: return "Walking"
+        case .jogging: return "Jogging"
+        case .cycling: return "Cycling"
+        case .driving: return "Driving"
+        case .bus: return "Bus"
+        case .custom: return "Custom"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .walking: return "figure.walk"
+        case .jogging: return "figure.run"
+        case .cycling: return "bicycle"
+        case .driving: return "car.fill"
+        case .bus: return "bus.fill"
+        case .custom: return "speedometer"
+        }
+    }
+
+    /// Fixed pace in m/s, or nil when speed comes from road data / user input.
+    var fixedSpeedMetersPerSecond: CLLocationSpeed? {
+        switch self {
+        case .walking: return 1.4
+        case .jogging: return 2.7
+        case .cycling: return 5.5
+        case .driving, .bus, .custom: return nil
+        }
+    }
+
+    /// Walking-ish profiles should route along footpaths, not roads.
+    var prefersWalkingDirections: Bool {
+        switch self {
+        case .walking, .jogging: return true
+        default: return false
+        }
+    }
+}
+
+private struct SpeedProfileSettings {
+    let profile: SpeedProfile
+    let customSpeedMetersPerSecond: CLLocationSpeed
+
+    static let busSpeedCapMetersPerSecond: CLLocationSpeed = 13.9   // ~50 km/h
+    static let busStopApproachRadius: CLLocationDistance = 60      // begin slowing
+    static let busStopApproachSpeed: CLLocationSpeed = 4.0         // crawl near stops
+    static let busStopDwellSeconds: TimeInterval = 12              // doors open
+    static let busStopSnapRadius: CLLocationDistance = 25          // dwell trigger
+
+    /// Resolve the playback speed for one segment given the road limit (if any).
+    func speed(forRoadLimit roadLimit: CLLocationSpeed?, fallback: CLLocationSpeed) -> CLLocationSpeed {
+        if let fixed = profile.fixedSpeedMetersPerSecond {
+            return fixed
+        }
+        switch profile {
+        case .custom:
+            return max(customSpeedMetersPerSecond, RouteSimulationDefaults.minimumSpeedMetersPerSecond)
+        case .bus:
+            return min(roadLimit ?? fallback, Self.busSpeedCapMetersPerSecond)
+        default: // .driving — original behavior
+            return roadLimit ?? fallback
+        }
+    }
+}
+
+private struct RouteSpeedContext {
+    let ways: [OpenStreetMapWay]
+    let busStops: [CLLocationCoordinate2D]
+}
+
 private struct OpenStreetMapWay {
     let geometry: [CLLocationCoordinate2D]
     let speedLimitMetersPerSecond: CLLocationSpeed
@@ -70,6 +152,8 @@ private struct OverpassResponse: Decodable {
     struct Element: Decodable {
         let tags: [String: String]?
         let geometry: [Coordinate]?
+        let lat: Double?
+        let lon: Double?
     }
 
     struct Coordinate: Decodable {
@@ -205,7 +289,7 @@ private func speedLimitMetersPerSecond(from tags: [String: String]) -> CLLocatio
     return directionalValues.min()
 }
 
-private func overpassQuery(for coordinates: [CLLocationCoordinate2D]) -> String? {
+private func overpassQuery(for coordinates: [CLLocationCoordinate2D], includeBusStops: Bool) -> String? {
     guard let first = coordinates.first else { return nil }
 
     var minLatitude = first.latitude
@@ -228,19 +312,26 @@ private func overpassQuery(for coordinates: [CLLocationCoordinate2D]) -> String?
 
     let bbox = String(format: "%.6f,%.6f,%.6f,%.6f", south, west, north, east)
 
+    let busStopClause = includeBusStops ? "\n      node(\(bbox))[highway=bus_stop];" : ""
+
     return """
     [out:json][timeout:20];
     (
       way(\(bbox))[highway][maxspeed];
       way(\(bbox))[highway]["maxspeed:forward"];
-      way(\(bbox))[highway]["maxspeed:backward"];
+      way(\(bbox))[highway]["maxspeed:backward"];\(busStopClause)
     );
     out tags geom;
     """
 }
 
-private func fetchOpenStreetMapWays(for coordinates: [CLLocationCoordinate2D]) async throws -> [OpenStreetMapWay] {
-    guard let query = overpassQuery(for: coordinates) else { return [] }
+private func fetchRouteSpeedContext(
+    for coordinates: [CLLocationCoordinate2D],
+    includeBusStops: Bool
+) async throws -> RouteSpeedContext {
+    guard let query = overpassQuery(for: coordinates, includeBusStops: includeBusStops) else {
+        return RouteSpeedContext(ways: [], busStops: [])
+    }
 
     var components = URLComponents(url: OpenStreetMapSpeedLimitService.endpoint, resolvingAgainstBaseURL: false)
     components?.queryItems = [URLQueryItem(name: "data", value: query)]
@@ -258,7 +349,8 @@ private func fetchOpenStreetMapWays(for coordinates: [CLLocationCoordinate2D]) a
     }
 
     let decoded = try JSONDecoder().decode(OverpassResponse.self, from: data)
-    return decoded.elements.compactMap { element in
+
+    let ways: [OpenStreetMapWay] = decoded.elements.compactMap { element in
         guard let tags = element.tags,
               let speedLimit = speedLimitMetersPerSecond(from: tags),
               let geometry = element.geometry?.map({ CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }),
@@ -271,6 +363,16 @@ private func fetchOpenStreetMapWays(for coordinates: [CLLocationCoordinate2D]) a
             speedLimitMetersPerSecond: speedLimit
         )
     }
+
+    let busStops: [CLLocationCoordinate2D] = decoded.elements.compactMap { element in
+        guard let lat = element.lat, let lon = element.lon,
+              element.tags?["highway"] == "bus_stop" else {
+            return nil
+        }
+        return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+    }
+
+    return RouteSpeedContext(ways: ways, busStops: busStops)
 }
 
 private func nearestSpeedLimit(
@@ -305,8 +407,9 @@ private func nearestSpeedLimit(
 
 private func buildPlaybackSamples(
     from displayCoordinates: [CLLocationCoordinate2D],
-    speedWays: [OpenStreetMapWay],
-    fallbackSpeedMetersPerSecond: CLLocationSpeed
+    speedContext: RouteSpeedContext,
+    fallbackSpeedMetersPerSecond: CLLocationSpeed,
+    speedSettings: SpeedProfileSettings
 ) -> [RoutePlaybackSample] {
     guard let firstCoordinate = displayCoordinates.first else { return [] }
 
@@ -317,11 +420,24 @@ private func buildPlaybackSamples(
             .distance(from: CLLocation(latitude: end.latitude, longitude: end.longitude))
         guard segmentDistance > 0 else { continue }
 
-        let speedLimit = nearestSpeedLimit(forSegmentFrom: start, to: end, using: speedWays) ?? fallbackSpeedMetersPerSecond
-        let walkingCapMetersPerSecond: CLLocationSpeed = 1.4
-        let cappedSpeed = min(speedLimit, walkingCapMetersPerSecond)
-        let clampedSpeed = max(cappedSpeed, RouteSimulationDefaults.minimumSpeedMetersPerSecond)
+        let roadLimit = nearestSpeedLimit(forSegmentFrom: start, to: end, using: speedContext.ways)
+        var speed = speedSettings.speed(forRoadLimit: roadLimit, fallback: fallbackSpeedMetersPerSecond)
 
+        // Bus mode: ease off when approaching a stop.
+        if speedSettings.profile == .bus,
+           !speedContext.busStops.isEmpty {
+            let midpoint = midpointCoordinate(from: start, to: end)
+            let midLocation = CLLocation(latitude: midpoint.latitude, longitude: midpoint.longitude)
+            let nearStop = speedContext.busStops.contains { stop in
+                midLocation.distance(from: CLLocation(latitude: stop.latitude, longitude: stop.longitude))
+                    <= SpeedProfileSettings.busStopApproachRadius
+            }
+            if nearStop {
+                speed = min(speed, SpeedProfileSettings.busStopApproachSpeed)
+            }
+        }
+
+        let clampedSpeed = max(speed, RouteSimulationDefaults.minimumSpeedMetersPerSecond)
         let segmentTravelTime = segmentDistance / clampedSpeed
         let segmentStepCount = max(1, Int(ceil(segmentTravelTime / RouteSimulationDefaults.playbackTickInterval)))
         let stepDelay = segmentTravelTime / Double(segmentStepCount)
@@ -338,18 +454,66 @@ private func buildPlaybackSamples(
         }
     }
 
+    // Bus mode: dwell once at each stop along the route (doors open, people shuffle).
+    if speedSettings.profile == .bus, !speedContext.busStops.isEmpty, samples.count > 1 {
+        var dwellIndices: Set<Int> = []
+        for stop in speedContext.busStops {
+            let stopLocation = CLLocation(latitude: stop.latitude, longitude: stop.longitude)
+            var bestIndex: Int?
+            var bestDistance = SpeedProfileSettings.busStopSnapRadius
+            for (index, sample) in samples.enumerated() {
+                let distance = stopLocation.distance(
+                    from: CLLocation(
+                        latitude: sample.coordinate.latitude,
+                        longitude: sample.coordinate.longitude
+                    )
+                )
+                if distance <= bestDistance {
+                    bestDistance = distance
+                    bestIndex = index
+                }
+            }
+            if let bestIndex, bestIndex > 0 {
+                dwellIndices.insert(bestIndex)
+            }
+        }
+
+        if !dwellIndices.isEmpty {
+            samples = samples.enumerated().map { index, sample in
+                guard dwellIndices.contains(index) else { return sample }
+                return RoutePlaybackSample(
+                    coordinate: sample.coordinate,
+                    delayFromPrevious: sample.delayFromPrevious + SpeedProfileSettings.busStopDwellSeconds
+                )
+            }
+        }
+    }
+
     return samples
 }
 
 private func prefetchRoutePlaybackSamples(
     displayCoordinates: [CLLocationCoordinate2D],
-    fallbackSpeedMetersPerSecond: CLLocationSpeed
+    fallbackSpeedMetersPerSecond: CLLocationSpeed,
+    speedSettings: SpeedProfileSettings
 ) async -> [RoutePlaybackSample] {
-    let speedWays = (try? await fetchOpenStreetMapWays(for: displayCoordinates)) ?? []
+    let needsRoadData = speedSettings.profile.fixedSpeedMetersPerSecond == nil
+        && speedSettings.profile != .custom
+    let context: RouteSpeedContext
+    if needsRoadData {
+        context = (try? await fetchRouteSpeedContext(
+            for: displayCoordinates,
+            includeBusStops: speedSettings.profile == .bus
+        )) ?? RouteSpeedContext(ways: [], busStops: [])
+    } else {
+        // Fixed/custom pace: no need to bother Overpass at all.
+        context = RouteSpeedContext(ways: [], busStops: [])
+    }
     return buildPlaybackSamples(
         from: displayCoordinates,
-        speedWays: speedWays,
-        fallbackSpeedMetersPerSecond: fallbackSpeedMetersPerSecond
+        speedContext: context,
+        fallbackSpeedMetersPerSecond: fallbackSpeedMetersPerSecond,
+        speedSettings: speedSettings
     )
 }
 
@@ -770,6 +934,41 @@ struct LocationSimulationView: View {
     @State private var showSaveBookmark = false
     @State private var newBookmarkName = ""
 
+    // Speed profile
+    @AppStorage("routeSpeedProfile") private var speedProfileRawValue: String = SpeedProfile.driving.rawValue
+    @AppStorage("routeSpeedCustomKmh") private var customSpeedKmh: Double = 30
+    @State private var showCustomSpeedPrompt = false
+    @State private var customSpeedInput = ""
+    @State private var lastFallbackSpeed: CLLocationSpeed = RouteSimulationDefaults.importedRouteFallbackSpeedMetersPerSecond
+    @State private var isImportedRoute = false
+
+    private var speedProfile: SpeedProfile {
+        SpeedProfile(rawValue: speedProfileRawValue) ?? .driving
+    }
+
+    private var speedSettings: SpeedProfileSettings {
+        SpeedProfileSettings(
+            profile: speedProfile,
+            customSpeedMetersPerSecond: max(customSpeedKmh, 1) / 3.6
+        )
+    }
+
+    private var speedProfileDetailText: String {
+        switch speedProfile {
+        case .custom:
+            return String(format: "%.0f km/h", max(customSpeedKmh, 1))
+        case .bus:
+            return "Road speed, pauses at stops"
+        case .driving:
+            return "Road speed limits"
+        default:
+            if let fixed = speedProfile.fixedSpeedMetersPerSecond {
+                return String(format: "%.0f km/h", fixed * 3.6)
+            }
+            return ""
+        }
+    }
+
     private var pairingFilePath: String {
         PairingFileStore.prepareURL().path
     }
@@ -813,7 +1012,17 @@ struct LocationSimulationView: View {
             value: routePlan.distance / 1000,
             unit: UnitLength.kilometers
         ).formatted(.measurement(width: .abbreviated, usage: .road))
-        let durationText = Self.routeDurationFormatter.string(from: routePlan.expectedTravelTime)
+
+        let travelTime: TimeInterval
+        if let fixed = speedProfile.fixedSpeedMetersPerSecond {
+            travelTime = routePlan.distance / fixed
+        } else if speedProfile == .custom {
+            travelTime = routePlan.distance / speedSettings.customSpeedMetersPerSecond
+        } else {
+            travelTime = routePlan.expectedTravelTime
+        }
+
+        let durationText = Self.routeDurationFormatter.string(from: travelTime)
         if let durationText, !durationText.isEmpty {
             return "\(distanceText) • ETA \(durationText)"
         }
@@ -1000,6 +1209,14 @@ struct LocationSimulationView: View {
         } message: {
             Text("Enter a name for this location.")
         }
+        .alert("Custom Speed", isPresented: $showCustomSpeedPrompt) {
+            TextField("Speed (km/h)", text: $customSpeedInput)
+                .keyboardType(.decimalPad)
+            Button("Set") { applyCustomSpeedInput() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Enter a playback speed in km/h.")
+        }
         .sheet(isPresented: $showBookmarks) {
             BookmarksView(bookmarks: $bookmarks) { bookmark in
                 applySelection(bookmark.coordinate)
@@ -1180,6 +1397,7 @@ struct LocationSimulationView: View {
 
         let distance = distanceAlong(displayCoordinates)
         let fallbackSpeed = RouteSimulationDefaults.importedRouteFallbackSpeedMetersPerSecond
+        isImportedRoute = true
         routeStartSelection = RouteSearchSelection(title: "\(sourceName) Start", coordinate: firstCoordinate)
         routeEndSelection = RouteSearchSelection(title: "\(sourceName) End", coordinate: lastCoordinate)
         setRoutePlan(RouteSimulationPlan(
@@ -1195,10 +1413,13 @@ struct LocationSimulationView: View {
         let requestID = UUID()
         routeRequestID = requestID
         isPrefetchingRouteSpeeds = true
+        lastFallbackSpeed = fallbackSpeed
+        let settings = speedSettings
         routeSpeedPrefetchTask = Task.detached(priority: .utility) {
             let playbackSamples = await prefetchRoutePlaybackSamples(
                 displayCoordinates: displayCoordinates,
-                fallbackSpeedMetersPerSecond: fallbackSpeed
+                fallbackSpeedMetersPerSecond: fallbackSpeed,
+                speedSettings: settings
             )
             guard !Task.isCancelled else { return }
             await MainActor.run {
@@ -1265,6 +1486,8 @@ struct LocationSimulationView: View {
 
             routeAttributionLink
 
+            speedProfileMenu
+
             HStack(spacing: 12) {
                 Button("Stop", action: clear)
                     .buttonStyle(.bordered)
@@ -1285,6 +1508,104 @@ struct LocationSimulationView: View {
                 Button("Reset", action: resetRouteSelection)
                     .buttonStyle(.bordered)
                     .disabled(isBusy || isRouteRunning)
+            }
+        }
+    }
+
+    private var speedProfileMenu: some View {
+        Menu {
+            ForEach(SpeedProfile.allCases) { profile in
+                Button {
+                    selectSpeedProfile(profile)
+                } label: {
+                    if profile == speedProfile {
+                        Label(profile.title, systemImage: "checkmark")
+                    } else {
+                        Label(profile.title, systemImage: profile.systemImage)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: speedProfile.systemImage)
+                Text(speedProfile.title)
+                    .font(.subheadline.weight(.medium))
+                if !speedProfileDetailText.isEmpty {
+                    Text(speedProfileDetailText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+        }
+        .buttonStyle(.bordered)
+        .tint(.blue)
+        .disabled(isBusy || isRouteRunning || isPrefetchingRouteSpeeds)
+        .accessibilityLabel("Playback speed: \(speedProfile.title)")
+    }
+
+    private func selectSpeedProfile(_ profile: SpeedProfile) {
+        if profile == .custom {
+            customSpeedInput = String(format: "%.0f", max(customSpeedKmh, 1))
+            showCustomSpeedPrompt = true
+            return
+        }
+        guard profile != speedProfile else { return }
+        let directionsChanged = profile.prefersWalkingDirections != speedProfile.prefersWalkingDirections
+        speedProfileRawValue = profile.rawValue
+
+        // Searched routes can be re-planned along footpaths; imported routes keep
+        // their exact geometry and only get their pacing rebuilt.
+        if directionsChanged,
+           !isImportedRoute,
+           routeStartSelection != nil,
+           routeEndSelection != nil {
+            refreshRoute()
+        } else {
+            rebuildPlaybackSamplesForCurrentRoute()
+        }
+    }
+
+    private func applyCustomSpeedInput() {
+        let normalized = customSpeedInput.replacingOccurrences(of: ",", with: ".")
+        guard let value = Double(normalized), value > 0 else {
+            alertTitle = "Invalid Speed"
+            alertMessage = "Enter a speed above 0 km/h."
+            showAlert = true
+            return
+        }
+        customSpeedKmh = min(value, 1000)
+        speedProfileRawValue = SpeedProfile.custom.rawValue
+        rebuildPlaybackSamplesForCurrentRoute()
+    }
+
+    private func rebuildPlaybackSamplesForCurrentRoute() {
+        guard let routePlan, !isRouteRunning else { return }
+
+        routeSpeedPrefetchTask?.cancel()
+        let requestID = UUID()
+        routeRequestID = requestID
+        isPrefetchingRouteSpeeds = true
+
+        let displayCoordinates = routePlan.displayCoordinates
+        let fallbackSpeed = lastFallbackSpeed
+        let settings = speedSettings
+
+        routeSpeedPrefetchTask = Task.detached(priority: .utility) {
+            let playbackSamples = await prefetchRoutePlaybackSamples(
+                displayCoordinates: displayCoordinates,
+                fallbackSpeedMetersPerSecond: fallbackSpeed,
+                speedSettings: settings
+            )
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard routeRequestID == requestID else { return }
+                routePlaybackSamples = playbackSamples
+                isPrefetchingRouteSpeeds = false
             }
         }
     }
@@ -1433,6 +1754,7 @@ struct LocationSimulationView: View {
         routeSpeedPrefetchTask?.cancel()
         setRoutePlan(nil)
         routePlaybackSamples = []
+        isImportedRoute = false
 
         guard let routeStart = routeStartSelection?.coordinate,
               let routeEnd = routeEndSelection?.coordinate else {
@@ -1450,7 +1772,7 @@ struct LocationSimulationView: View {
         request.source = MKMapItem(placemark: MKPlacemark(coordinate: routeStart))
         request.destination = MKMapItem(placemark: MKPlacemark(coordinate: routeEnd))
         request.requestsAlternateRoutes = false
-        request.transportType = .automobile
+        request.transportType = speedProfile.prefersWalkingDirections ? .walking : .automobile
 
         routeLoadTask = Task {
             do {
@@ -1490,11 +1812,14 @@ struct LocationSimulationView: View {
 
                 await MainActor.run {
                     guard routeRequestID == requestID else { return }
+                    lastFallbackSpeed = fallbackSpeed
+                    let settings = speedSettings
                     routeSpeedPrefetchTask?.cancel()
                     routeSpeedPrefetchTask = Task.detached(priority: .utility) {
                         let playbackSamples = await prefetchRoutePlaybackSamples(
                             displayCoordinates: displayCoordinates,
-                            fallbackSpeedMetersPerSecond: fallbackSpeed
+                            fallbackSpeedMetersPerSecond: fallbackSpeed,
+                            speedSettings: settings
                         )
                         guard !Task.isCancelled else { return }
                         await MainActor.run {
