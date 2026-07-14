@@ -126,8 +126,7 @@ final class JITEnableContext {
         }
 
         if let ffiError {
-            let readError = error(from: ffiError, fallback: "Failed to read pairing file!")
-            throw Self.isMalformedPairingFile(readError) ? malformedPairingFileError(readError) : readError
+            throw error(from: ffiError, fallback: "Failed to read pairing file!")
         }
 
         guard let pairingFile else {
@@ -135,24 +134,6 @@ final class JITEnableContext {
         }
 
         return pairingFile
-    }
-
-    /// `rp_pairing_file_read` only parses the local plist on disk — no network
-    /// involved — so a Serde/plist error here always means the file's contents
-    /// are the wrong shape (e.g. an older pairing file missing `public_key`),
-    /// not a transient failure a retry would fix. Reclassifying it to the same
-    /// code as an invalid pairing file routes it to the "select a new file"
-    /// prompt instead of the generic connection-error/retry flow.
-    private static func isMalformedPairingFile(_ error: NSError) -> Bool {
-        let message = error.localizedDescription.lowercased()
-        return message.contains("missing field") || message.contains("serde(") || message.contains("plist(error")
-    }
-
-    private func malformedPairingFileError(_ underlying: NSError) -> NSError {
-        makeError(
-            "The pairing file is missing data StikDebug needs (\(underlying.localizedDescription)). It's likely the wrong format or an incomplete export — select a new pairing file.",
-            code: -9
-        )
     }
 
     private func createTunnel(hostname: String) throws -> TunnelHandles {
