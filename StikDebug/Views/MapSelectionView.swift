@@ -318,7 +318,10 @@ private func buildPlaybackSamples(
         guard segmentDistance > 0 else { continue }
 
         let speedLimit = nearestSpeedLimit(forSegmentFrom: start, to: end, using: speedWays) ?? fallbackSpeedMetersPerSecond
-        let clampedSpeed = max(speedLimit, RouteSimulationDefaults.minimumSpeedMetersPerSecond)
+        let walkingCapMetersPerSecond: CLLocationSpeed = 1.4
+        let cappedSpeed = min(speedLimit, walkingCapMetersPerSecond)
+        let clampedSpeed = max(cappedSpeed, RouteSimulationDefaults.minimumSpeedMetersPerSecond)
+
         let segmentTravelTime = segmentDistance / clampedSpeed
         let segmentStepCount = max(1, Int(ceil(segmentTravelTime / RouteSimulationDefaults.playbackTickInterval)))
         let stepDelay = segmentTravelTime / Double(segmentStepCount)
