@@ -738,7 +738,7 @@ final class JITEnableContext {
     private func sendContinue(_ debugProxy: OpaquePointer) {
         // "$c#63" — RSP continue-all-threads packet (valid in no-ack mode).
         var packet: [UInt8] = [0x24, 0x63, 0x23, 0x36, 0x33]
-        _ = debug_proxy_send_raw(debugProxy, &packet, packet.count)
+        _ = debug_proxy_send_raw(debugProxy, &packet, UInt(packet.count))
     }
 
     func startSyslogRelay(handler: @escaping SyslogLineHandler, onError: @escaping SyslogErrorHandler) {
