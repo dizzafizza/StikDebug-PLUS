@@ -24,7 +24,8 @@ jobs:
       - name: 2. Configure Xcode Environment
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '16.4'
+          xcode-version: '26.6.0'
+
 
 
       - name: 3. Compile Project Archive
