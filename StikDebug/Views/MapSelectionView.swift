@@ -42,9 +42,23 @@ private struct RouteSimulationPlan {
 
 private enum RouteSimulationDefaults {
     static let pathSamplingDistance: CLLocationDistance = 10
+    /// Cap on densified route points. Playback interpolates within segments per
+    /// tick regardless, so coarser spacing on long routes costs no smoothness —
+    /// it just keeps memory, polyline rendering, and sample building bounded.
+    static let maxDisplayCoordinateCount = 25_000
     static let playbackTickInterval: TimeInterval = 0.5
     static let minimumSpeedMetersPerSecond: CLLocationSpeed = 1.0
     static let importedRouteFallbackSpeedMetersPerSecond: CLLocationSpeed = 13.4
+}
+
+/// 10 m spacing for short routes, widening once a route would exceed the
+/// display-point cap (e.g. a 500 km route samples every ~20 m instead).
+private func adaptiveSamplingDistance(for coordinates: [CLLocationCoordinate2D]) -> CLLocationDistance {
+    let totalDistance = distanceAlong(coordinates)
+    return max(
+        RouteSimulationDefaults.pathSamplingDistance,
+        totalDistance / Double(RouteSimulationDefaults.maxDisplayCoordinateCount)
+    )
 }
 
 private struct RoutePlaybackSample {
@@ -203,8 +217,38 @@ private struct OpenStreetMapWay {
 private enum OpenStreetMapSpeedLimitService {
     static let endpoint = URL(string: "https://overpass-api.de/api/interpreter")!
     static let copyrightURL = URL(string: "https://www.openstreetmap.org/copyright")!
-    static let boundingBoxPaddingDegrees = 0.0015
     static let nearestWayThreshold: CLLocationDistance = 40
+
+    // Corridor query tuning. Rather than a bounding box over the whole route
+    // (which balloons for long/diagonal routes and pulls in every road in the
+    // rectangle), we query `around` a downsampled version of the route so the
+    // payload scales with the route's length, not its bounding area.
+    static let corridorMinSpacing: CLLocationDistance = 75   // downsample step
+    static let corridorMaxPoints = 700                       // cap query size
+    static let corridorWayRadius: CLLocationDistance = 60    // road search radius
+    static let corridorBusStopRadius: CLLocationDistance = 90 // stop search radius
+    static let requestTimeout: TimeInterval = 30
+
+    // Spatial index cell size (~440 m at the equator). Comfortably larger than
+    // every search radius above, so a ±1 cell ring around a query point always
+    // covers the relevant neighborhood.
+    static let indexCellSizeDegrees = 0.004
+}
+
+/// Integer cell coordinate used by the spatial indexes below.
+private struct SpatialCellKey: Hashable {
+    let x: Int
+    let y: Int
+
+    init(x: Int, y: Int) {
+        self.x = x
+        self.y = y
+    }
+
+    init(latitude: Double, longitude: Double, cellSizeDegrees: Double) {
+        x = Int(floor(longitude / cellSizeDegrees))
+        y = Int(floor(latitude / cellSizeDegrees))
+    }
 }
 
 private struct OverpassResponse: Decodable {
@@ -350,46 +394,83 @@ private func speedLimitMetersPerSecond(from tags: [String: String]) -> CLLocatio
     return directionalValues.min()
 }
 
-private func overpassQuery(for coordinates: [CLLocationCoordinate2D], includeBusStops: Bool) -> String? {
-    guard let first = coordinates.first else { return nil }
+/// Reduce a dense (≈10 m) route to a sparse set of points spaced at least
+/// `minimumSpacing` apart, capped at `maximumPointCount`. Used to keep the
+/// Overpass `around` query small while still tracing the whole route.
+private func corridorCoordinates(
+    from coordinates: [CLLocationCoordinate2D],
+    minimumSpacing: CLLocationDistance,
+    maximumPointCount: Int
+) -> [CLLocationCoordinate2D] {
+    guard coordinates.count > 2 else { return coordinates }
 
-    var minLatitude = first.latitude
-    var maxLatitude = first.latitude
-    var minLongitude = first.longitude
-    var maxLongitude = first.longitude
+    let totalDistance = distanceAlong(coordinates)
+    let spacing = max(minimumSpacing, totalDistance / Double(max(1, maximumPointCount - 1)))
+
+    var result: [CLLocationCoordinate2D] = [coordinates[0]]
+    var accumulated: CLLocationDistance = 0
+    var previous = coordinates[0]
 
     for coordinate in coordinates.dropFirst() {
-        minLatitude = min(minLatitude, coordinate.latitude)
-        maxLatitude = max(maxLatitude, coordinate.latitude)
-        minLongitude = min(minLongitude, coordinate.longitude)
-        maxLongitude = max(maxLongitude, coordinate.longitude)
+        accumulated += CLLocation(latitude: previous.latitude, longitude: previous.longitude)
+            .distance(from: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude))
+        previous = coordinate
+        if accumulated >= spacing {
+            result.append(coordinate)
+            accumulated = 0
+        }
     }
 
-    let padding = OpenStreetMapSpeedLimitService.boundingBoxPaddingDegrees
-    let south = minLatitude - padding
-    let west = minLongitude - padding
-    let north = maxLatitude + padding
-    let east = maxLongitude + padding
+    if let last = coordinates.last,
+       result.last.map(CoordinateSnapshot.init) != CoordinateSnapshot(last) {
+        result.append(last)
+    }
 
-    let bbox = String(format: "%.6f,%.6f,%.6f,%.6f", south, west, north, east)
+    return result
+}
+
+private func overpassCorridorString(_ coordinates: [CLLocationCoordinate2D]) -> String {
+    coordinates
+        .map { String(format: "%.5f,%.5f", $0.latitude, $0.longitude) }
+        .joined(separator: ",")
+}
+
+private func overpassQuery(for coordinates: [CLLocationCoordinate2D], includeBusStops: Bool) -> String? {
+    let corridor = corridorCoordinates(
+        from: coordinates,
+        minimumSpacing: OpenStreetMapSpeedLimitService.corridorMinSpacing,
+        maximumPointCount: OpenStreetMapSpeedLimitService.corridorMaxPoints
+    )
+    guard !corridor.isEmpty else { return nil }
+
+    let coordString = overpassCorridorString(corridor)
+    let wayRadius = Int(OpenStreetMapSpeedLimitService.corridorWayRadius.rounded())
 
     // Bus stops are mapped inconsistently in OSM: the legacy `highway=bus_stop`
     // tag, and the newer public_transport schema (platform / stop_position with
     // `bus=yes`). Query all of them so we don't miss most stops in areas that use
     // the modern tagging.
-    let busStopClause = includeBusStops ? """
+    var busStopClause = ""
+    if includeBusStops {
+        let stopRadius = Int(OpenStreetMapSpeedLimitService.corridorBusStopRadius.rounded())
+        busStopClause = """
 
-      node(\(bbox))[highway=bus_stop];
-      node(\(bbox))[public_transport=platform][bus=yes];
-      node(\(bbox))[public_transport=stop_position][bus=yes];
-    """ : ""
+          node(around:\(stopRadius),\(coordString))[highway=bus_stop];
+          node(around:\(stopRadius),\(coordString))[public_transport=platform][bus=yes];
+          node(around:\(stopRadius),\(coordString))[public_transport=stop_position][bus=yes];
+        """
+    }
 
+    // `around` selects only elements near the route corridor, so the response
+    // stays small even for long routes instead of covering the whole bounding
+    // rectangle.
     return """
-    [out:json][timeout:20];
+    [out:json][timeout:25];
+    way(around:\(wayRadius),\(coordString))[highway]->.roads;
     (
-      way(\(bbox))[highway][maxspeed];
-      way(\(bbox))[highway]["maxspeed:forward"];
-      way(\(bbox))[highway]["maxspeed:backward"];\(busStopClause)
+      way.roads[maxspeed];
+      way.roads["maxspeed:forward"];
+      way.roads["maxspeed:backward"];\(busStopClause)
     );
     out tags geom;
     """
@@ -414,11 +495,21 @@ private func fetchRouteSpeedContext(
         return RouteSpeedContext(ways: [], busStops: [])
     }
 
-    var components = URLComponents(url: OpenStreetMapSpeedLimitService.endpoint, resolvingAgainstBaseURL: false)
-    components?.queryItems = [URLQueryItem(name: "data", value: query)]
-    guard let url = components?.url else { return RouteSpeedContext(ways: [], busStops: []) }
+    // POST the query: corridor queries grow with route length and can exceed
+    // URL limits as a GET. The explicit timeout keeps a slow Overpass server
+    // from stalling route prep indefinitely — on failure the caller falls back
+    // to profile/ETA pacing.
+    var request = URLRequest(url: OpenStreetMapSpeedLimitService.endpoint)
+    request.httpMethod = "POST"
+    request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+    request.timeoutInterval = OpenStreetMapSpeedLimitService.requestTimeout
 
-    let (data, response) = try await URLSession.shared.data(from: url)
+    var formAllowed = CharacterSet.alphanumerics
+    formAllowed.insert(charactersIn: "-._~")
+    let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: formAllowed) ?? ""
+    request.httpBody = "data=\(encodedQuery)".data(using: .utf8)
+
+    let (data, response) = try await URLSession.shared.data(for: request)
 
     if let httpResponse = response as? HTTPURLResponse,
        !(200...299).contains(httpResponse.statusCode) {
@@ -457,34 +548,125 @@ private func fetchRouteSpeedContext(
     return RouteSpeedContext(ways: ways, busStops: busStops)
 }
 
-private func nearestSpeedLimit(
-    forSegmentFrom start: CLLocationCoordinate2D,
-    to end: CLLocationCoordinate2D,
-    using ways: [OpenStreetMapWay]
-) -> CLLocationSpeed? {
-    let midpoint = MKMapPoint(midpointCoordinate(from: start, to: end))
-    var bestMatch: (speed: CLLocationSpeed, distance: CLLocationDistance)?
+private struct IndexedWaySegment {
+    let start: MKMapPoint
+    let end: MKMapPoint
+    let speedLimitMetersPerSecond: CLLocationSpeed
+}
 
-    for way in ways {
-        for (wayStart, wayEnd) in zip(way.geometry, way.geometry.dropFirst()) {
-            let candidateDistance = distanceFromPoint(
-                midpoint,
-                toSegmentFrom: MKMapPoint(wayStart),
-                to: MKMapPoint(wayEnd)
-            )
+/// Grid-bucketed index over the Overpass response. The old implementation
+/// rescanned every way segment for every route segment (O(route × ways)),
+/// which made long routes take minutes of CPU; bucketing by ~440 m cells and
+/// probing only the 3×3 neighborhood turns each lookup into a handful of
+/// segment checks. All search radii (≤ 90 m) are far smaller than a cell at
+/// non-polar latitudes, so ring probing never misses a legitimate match.
+private struct RouteSpeedIndex {
+    private var waySegments: [SpatialCellKey: [IndexedWaySegment]] = [:]
+    private var busStopCells: [SpatialCellKey: [CLLocationCoordinate2D]] = [:]
+    private let cellSize = OpenStreetMapSpeedLimitService.indexCellSizeDegrees
 
-            if bestMatch == nil || candidateDistance < bestMatch!.distance {
-                bestMatch = (way.speedLimitMetersPerSecond, candidateDistance)
+    init(context: RouteSpeedContext) {
+        for way in context.ways {
+            for (wayStart, wayEnd) in zip(way.geometry, way.geometry.dropFirst()) {
+                let segment = IndexedWaySegment(
+                    start: MKMapPoint(wayStart),
+                    end: MKMapPoint(wayEnd),
+                    speedLimitMetersPerSecond: way.speedLimitMetersPerSecond
+                )
+                // A segment can cross cell boundaries; register it in every
+                // cell its bounding box touches so ring probes always see it.
+                let minX = Int(floor(min(wayStart.longitude, wayEnd.longitude) / cellSize))
+                let maxX = Int(floor(max(wayStart.longitude, wayEnd.longitude) / cellSize))
+                let minY = Int(floor(min(wayStart.latitude, wayEnd.latitude) / cellSize))
+                let maxY = Int(floor(max(wayStart.latitude, wayEnd.latitude) / cellSize))
+                // A real road segment spans at most a couple of cells; a huge
+                // span means broken data (e.g. antimeridian jump) — skip it
+                // rather than flooding the index.
+                guard maxX - minX <= 8, maxY - minY <= 8 else { continue }
+                for x in minX...maxX {
+                    for y in minY...maxY {
+                        waySegments[SpatialCellKey(x: x, y: y), default: []].append(segment)
+                    }
+                }
             }
+        }
+
+        for stop in context.busStops {
+            let key = SpatialCellKey(
+                latitude: stop.latitude,
+                longitude: stop.longitude,
+                cellSizeDegrees: cellSize
+            )
+            busStopCells[key, default: []].append(stop)
         }
     }
 
-    guard let bestMatch,
-          bestMatch.distance <= OpenStreetMapSpeedLimitService.nearestWayThreshold else {
-        return nil
+    func nearestSpeedLimit(
+        forSegmentFrom start: CLLocationCoordinate2D,
+        to end: CLLocationCoordinate2D
+    ) -> CLLocationSpeed? {
+        guard !waySegments.isEmpty else { return nil }
+
+        let midpoint = midpointCoordinate(from: start, to: end)
+        let midMapPoint = MKMapPoint(midpoint)
+        let center = SpatialCellKey(
+            latitude: midpoint.latitude,
+            longitude: midpoint.longitude,
+            cellSizeDegrees: cellSize
+        )
+
+        var bestMatch: (speed: CLLocationSpeed, distance: CLLocationDistance)?
+        for dx in -1...1 {
+            for dy in -1...1 {
+                guard let bucket = waySegments[SpatialCellKey(x: center.x + dx, y: center.y + dy)] else {
+                    continue
+                }
+                for segment in bucket {
+                    let candidateDistance = distanceFromPoint(
+                        midMapPoint,
+                        toSegmentFrom: segment.start,
+                        to: segment.end
+                    )
+                    if bestMatch == nil || candidateDistance < bestMatch!.distance {
+                        bestMatch = (segment.speedLimitMetersPerSecond, candidateDistance)
+                    }
+                }
+            }
+        }
+
+        guard let bestMatch,
+              bestMatch.distance <= OpenStreetMapSpeedLimitService.nearestWayThreshold else {
+            return nil
+        }
+
+        return bestMatch.speed
     }
 
-    return bestMatch.speed
+    func hasBusStop(within radius: CLLocationDistance, of coordinate: CLLocationCoordinate2D) -> Bool {
+        guard !busStopCells.isEmpty else { return false }
+
+        let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+        let center = SpatialCellKey(
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude,
+            cellSizeDegrees: cellSize
+        )
+
+        for dx in -1...1 {
+            for dy in -1...1 {
+                guard let bucket = busStopCells[SpatialCellKey(x: center.x + dx, y: center.y + dy)] else {
+                    continue
+                }
+                for stop in bucket {
+                    let stopLocation = CLLocation(latitude: stop.latitude, longitude: stop.longitude)
+                    if location.distance(from: stopLocation) <= radius {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
 }
 
 private func buildPlaybackSamples(
@@ -495,6 +677,7 @@ private func buildPlaybackSamples(
 ) -> [RoutePlaybackSample] {
     guard let firstCoordinate = displayCoordinates.first else { return [] }
 
+    let speedIndex = RouteSpeedIndex(context: speedContext)
     var samples = [RoutePlaybackSample(coordinate: firstCoordinate, delayFromPrevious: 0)]
 
     for (start, end) in zip(displayCoordinates, displayCoordinates.dropFirst()) {
@@ -502,19 +685,17 @@ private func buildPlaybackSamples(
             .distance(from: CLLocation(latitude: end.latitude, longitude: end.longitude))
         guard segmentDistance > 0 else { continue }
 
-        let roadLimit = nearestSpeedLimit(forSegmentFrom: start, to: end, using: speedContext.ways)
+        let roadLimit = speedIndex.nearestSpeedLimit(forSegmentFrom: start, to: end)
         var speed = speedSettings.speed(forRoadLimit: roadLimit, fallback: fallbackSpeedMetersPerSecond)
 
         // Bus mode: ease off when approaching a stop.
         if speedSettings.profile == .bus,
            !speedContext.busStops.isEmpty {
             let midpoint = midpointCoordinate(from: start, to: end)
-            let midLocation = CLLocation(latitude: midpoint.latitude, longitude: midpoint.longitude)
-            let nearStop = speedContext.busStops.contains { stop in
-                midLocation.distance(from: CLLocation(latitude: stop.latitude, longitude: stop.longitude))
-                    <= SpeedProfileSettings.busStopApproachRadius
-            }
-            if nearStop {
+            if speedIndex.hasBusStop(
+                within: SpeedProfileSettings.busStopApproachRadius,
+                of: midpoint
+            ) {
                 speed = min(speed, SpeedProfileSettings.busStopApproachSpeed)
             }
         }
@@ -538,21 +719,47 @@ private func buildPlaybackSamples(
 
     // Bus mode: dwell once at each stop along the route (doors open, people shuffle).
     if speedSettings.profile == .bus, !speedContext.busStops.isEmpty, samples.count > 1 {
+        // Bucket the samples by grid cell so each stop only compares against
+        // nearby samples instead of the entire (potentially huge) sample list.
+        let cellSize = OpenStreetMapSpeedLimitService.indexCellSizeDegrees
+        var sampleCells: [SpatialCellKey: [Int]] = [:]
+        for (index, sample) in samples.enumerated() {
+            let key = SpatialCellKey(
+                latitude: sample.coordinate.latitude,
+                longitude: sample.coordinate.longitude,
+                cellSizeDegrees: cellSize
+            )
+            sampleCells[key, default: []].append(index)
+        }
+
         var dwellIndices: Set<Int> = []
         for stop in speedContext.busStops {
             let stopLocation = CLLocation(latitude: stop.latitude, longitude: stop.longitude)
+            let center = SpatialCellKey(
+                latitude: stop.latitude,
+                longitude: stop.longitude,
+                cellSizeDegrees: cellSize
+            )
             var bestIndex: Int?
             var bestDistance = SpeedProfileSettings.busStopSnapRadius
-            for (index, sample) in samples.enumerated() {
-                let distance = stopLocation.distance(
-                    from: CLLocation(
-                        latitude: sample.coordinate.latitude,
-                        longitude: sample.coordinate.longitude
-                    )
-                )
-                if distance <= bestDistance {
-                    bestDistance = distance
-                    bestIndex = index
+            for dx in -1...1 {
+                for dy in -1...1 {
+                    guard let bucket = sampleCells[SpatialCellKey(x: center.x + dx, y: center.y + dy)] else {
+                        continue
+                    }
+                    for index in bucket {
+                        let sample = samples[index]
+                        let distance = stopLocation.distance(
+                            from: CLLocation(
+                                latitude: sample.coordinate.latitude,
+                                longitude: sample.coordinate.longitude
+                            )
+                        )
+                        if distance <= bestDistance {
+                            bestDistance = distance
+                            bestIndex = index
+                        }
+                    }
                 }
             }
             if let bestIndex, bestIndex > 0 {
@@ -1516,7 +1723,7 @@ struct LocationSimulationView: View {
 
         let displayCoordinates = sampledRouteCoordinates(
             from: coordinates,
-            targetDistance: RouteSimulationDefaults.pathSamplingDistance
+            targetDistance: adaptiveSamplingDistance(for: coordinates)
         )
 
         guard displayCoordinates.count > 1,
@@ -1948,9 +2155,10 @@ struct LocationSimulationView: View {
                     )
                 }
 
+                let routeCoordinates = route.polyline.coordinateArray
                 let displayCoordinates = sampledRouteCoordinates(
-                    from: route.polyline.coordinateArray,
-                    targetDistance: RouteSimulationDefaults.pathSamplingDistance
+                    from: routeCoordinates,
+                    targetDistance: adaptiveSamplingDistance(for: routeCoordinates)
                 )
                 let routePlan = RouteSimulationPlan(
                     displayCoordinates: displayCoordinates,
