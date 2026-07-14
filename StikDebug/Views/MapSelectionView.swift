@@ -553,11 +553,16 @@ private func buildPlaybackSamples(
     return samples
 }
 
+private struct RoutePlaybackPrefetchResult {
+    let samples: [RoutePlaybackSample]
+    let busStops: [CLLocationCoordinate2D]
+}
+
 private func prefetchRoutePlaybackSamples(
     displayCoordinates: [CLLocationCoordinate2D],
     fallbackSpeedMetersPerSecond: CLLocationSpeed,
     speedSettings: SpeedProfileSettings
-) async -> [RoutePlaybackSample] {
+) async -> RoutePlaybackPrefetchResult {
     let needsRoadData = speedSettings.profile.fixedSpeedMetersPerSecond == nil
         && speedSettings.profile != .custom
     let context: RouteSpeedContext
@@ -570,12 +575,13 @@ private func prefetchRoutePlaybackSamples(
         // Fixed/custom pace: no need to bother Overpass at all.
         context = RouteSpeedContext(ways: [], busStops: [])
     }
-    return buildPlaybackSamples(
+    let samples = buildPlaybackSamples(
         from: displayCoordinates,
         speedContext: context,
         fallbackSpeedMetersPerSecond: fallbackSpeedMetersPerSecond,
         speedSettings: speedSettings
     )
+    return RoutePlaybackPrefetchResult(samples: samples, busStops: context.busStops)
 }
 
 private enum CoordinateImportError: LocalizedError {
@@ -977,6 +983,7 @@ struct LocationSimulationView: View {
     @State private var routePlan: RouteSimulationPlan?
     @State private var routePolyline: MKPolyline?
     @State private var routePlaybackSamples: [RoutePlaybackSample] = []
+    @State private var routeBusStops: [CLLocationCoordinate2D] = []
     @State private var routePlaybackCoordinate: CLLocationCoordinate2D?
     @State private var simulatedCoordinate: CLLocationCoordinate2D?
     @State private var routeRequestID = UUID()
@@ -1188,6 +1195,12 @@ struct LocationSimulationView: View {
                         if let routePolyline {
                             MapPolyline(routePolyline)
                                 .stroke(.blue.opacity(0.8), lineWidth: 5)
+                        }
+                        if speedProfile == .bus {
+                            ForEach(Array(routeBusStops.enumerated()), id: \.offset) { _, stop in
+                                Marker("Bus Stop", systemImage: "bus.fill", coordinate: stop)
+                                    .tint(.orange)
+                            }
                         }
                         if let routeStartCoordinate {
                             Marker("Start", coordinate: routeStartCoordinate)
@@ -1474,6 +1487,7 @@ struct LocationSimulationView: View {
         routeRequestID = UUID()
         setRoutePlan(nil)
         routePlaybackSamples = []
+        routeBusStops = []
         routePlaybackCoordinate = nil
         isLoadingRoute = false
         isPrefetchingRouteSpeeds = false
@@ -1511,7 +1525,7 @@ struct LocationSimulationView: View {
         lastFallbackSpeed = fallbackSpeed
         let settings = speedSettings
         routeSpeedPrefetchTask = Task.detached(priority: .utility) {
-            let playbackSamples = await prefetchRoutePlaybackSamples(
+            let prefetch = await prefetchRoutePlaybackSamples(
                 displayCoordinates: displayCoordinates,
                 fallbackSpeedMetersPerSecond: fallbackSpeed,
                 speedSettings: settings
@@ -1519,7 +1533,8 @@ struct LocationSimulationView: View {
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 guard routeRequestID == requestID else { return }
-                routePlaybackSamples = playbackSamples
+                routePlaybackSamples = prefetch.samples
+                routeBusStops = prefetch.busStops
                 isPrefetchingRouteSpeeds = false
             }
         }
@@ -1719,7 +1734,7 @@ struct LocationSimulationView: View {
         let settings = speedSettings
 
         routeSpeedPrefetchTask = Task.detached(priority: .utility) {
-            let playbackSamples = await prefetchRoutePlaybackSamples(
+            let prefetch = await prefetchRoutePlaybackSamples(
                 displayCoordinates: displayCoordinates,
                 fallbackSpeedMetersPerSecond: fallbackSpeed,
                 speedSettings: settings
@@ -1727,7 +1742,8 @@ struct LocationSimulationView: View {
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 guard routeRequestID == requestID else { return }
-                routePlaybackSamples = playbackSamples
+                routePlaybackSamples = prefetch.samples
+                routeBusStops = prefetch.busStops
                 isPrefetchingRouteSpeeds = false
             }
         }
@@ -1867,6 +1883,7 @@ struct LocationSimulationView: View {
         routeStartSelection = nil
         routeEndSelection = nil
         routePlaybackSamples = []
+        routeBusStops = []
         routePlaybackCoordinate = nil
         isLoadingRoute = false
         isPrefetchingRouteSpeeds = false
@@ -1877,6 +1894,7 @@ struct LocationSimulationView: View {
         routeSpeedPrefetchTask?.cancel()
         setRoutePlan(nil)
         routePlaybackSamples = []
+        routeBusStops = []
         isImportedRoute = false
 
         guard let routeStart = routeStartSelection?.coordinate,
@@ -1939,7 +1957,7 @@ struct LocationSimulationView: View {
                     let settings = speedSettings
                     routeSpeedPrefetchTask?.cancel()
                     routeSpeedPrefetchTask = Task.detached(priority: .utility) {
-                        let playbackSamples = await prefetchRoutePlaybackSamples(
+                        let prefetch = await prefetchRoutePlaybackSamples(
                             displayCoordinates: displayCoordinates,
                             fallbackSpeedMetersPerSecond: fallbackSpeed,
                             speedSettings: settings
@@ -1947,7 +1965,8 @@ struct LocationSimulationView: View {
                         guard !Task.isCancelled else { return }
                         await MainActor.run {
                             guard routeRequestID == requestID else { return }
-                            routePlaybackSamples = playbackSamples
+                            routePlaybackSamples = prefetch.samples
+                            routeBusStops = prefetch.busStops
                             isPrefetchingRouteSpeeds = false
                         }
                     }
