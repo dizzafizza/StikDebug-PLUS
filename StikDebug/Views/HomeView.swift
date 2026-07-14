@@ -11,8 +11,10 @@ struct HomeView: View {
     @AppStorage("autoQuitAfterEnablingJIT") private var doAutoQuitAfterEnablingJIT = false
     @AppStorage("bundleID") private var bundleID: String = ""
     @AppStorage(UserDefaults.Keys.confirmExternalJITRequests) private var confirmExternalJITRequests = true
+    @AppStorage("keepAppAliveBackground") private var keepAppAliveBackground = false
 
     @ObservedObject private var mounting = MountingProgress.shared
+    @ObservedObject private var aliveManager = BackgroundAliveManager.shared
 
     @State private var hasAppeared = false
     @State private var pendingJITEnableConfiguration: JITEnableConfiguration?
@@ -34,8 +36,19 @@ struct HomeView: View {
         InstalledAppsListView(onSelectApp: { selectedBundle, selectedName in
             bundleID = selectedBundle
             Haptics.medium()
-            startJITInBackground(bundleID: selectedBundle, displayName: selectedName)
+            if keepAppAliveBackground {
+                startKeepAlive(bundleID: selectedBundle, displayName: selectedName)
+            } else {
+                startJITInBackground(bundleID: selectedBundle, displayName: selectedName)
+            }
         }, showDoneButton: false, onImportPairingFile: { isShowingPairingFilePicker = true })
+        .overlay(alignment: .top) {
+            if let activeApp = aliveManager.activeAppName {
+                keepAliveBanner(appName: activeApp)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
         .overlay(alignment: .bottom) {
             if let debugFeedback {
                 debugFeedbackView(debugFeedback)
@@ -43,6 +56,7 @@ struct HomeView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .animation(.default, value: aliveManager.activeAppName)
         .onAppear(perform: handleAppear)
         .onReceive(NotificationCenter.default.publisher(for: .intentJSScriptReady), perform: handleScriptReadyNotification)
         .onReceive(timer) { _ in
@@ -236,6 +250,50 @@ struct HomeView: View {
                 let _ = JITEnableContext.shared.launchAppWithoutDebug(bundleID, logger: nil)
             }
         }
+    }
+
+    private func keepAliveBanner(appName: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "bolt.circle.fill")
+                .foregroundStyle(.green)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(String(format: "Keeping %@ alive".localized, appName))
+                    .font(.subheadline.weight(.semibold))
+                Text("Held in the background".localized)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button("Stop".localized) {
+                Haptics.medium()
+                BackgroundAliveManager.shared.stop()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .tint(.red)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Capsule().fill(.ultraThinMaterial))
+        .shadow(radius: 4)
+        .padding(.horizontal, 20)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(String(format: "Keeping %@ alive in the background".localized, appName))
+    }
+
+    private func startKeepAlive(bundleID: String, displayName: String?) {
+        let name = displayName ?? bundleID
+        guard !aliveManager.isActive else {
+            showAlert(
+                title: "Keep-Alive Active".localized,
+                message: "StikDebug is already holding an app alive in the background. Stop it before starting another.".localized,
+                showOk: true
+            )
+            return
+        }
+        let startingMessage = String(format: "Keeping %@ alive in the background".localized, name)
+        AccessibilityAnnouncer.announce(startingMessage)
+        BackgroundAliveManager.shared.start(bundleID: bundleID, displayName: displayName)
     }
 
     private func debugFeedbackView(_ feedback: DebugFeedback) -> some View {

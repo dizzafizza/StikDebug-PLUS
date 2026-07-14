@@ -24,7 +24,8 @@ enum AppBootstrapper {
             UserDefaults.Keys.txmOverride: false,
             UserDefaults.Keys.confirmExternalJITRequests: true,
             "keepAliveAudio": true,
-            "keepAliveLocation": true
+            "keepAliveLocation": true,
+            "keepAppAliveBackground": false
         ])
     }
 

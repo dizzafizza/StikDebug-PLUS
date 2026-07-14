@@ -642,6 +642,105 @@ final class JITEnableContext {
         }
     }
 
+    /// Launches an app, attaches the debugger, and *holds* the session open so the
+    /// app keeps running in the background.
+    ///
+    /// A debugger-owned process is not suspended by iOS when it moves to the
+    /// background (the same reason an app run from Xcode keeps executing while
+    /// backgrounded). Attaching also sets `CS_DEBUGGED`, so JIT is enabled too.
+    /// We additionally lift the process memory limit to reduce the chance of a
+    /// background jetsam kill. The hold runs until `cancellation` is set, then we
+    /// interrupt and detach so the app continues running on its own.
+    ///
+    /// - Note: This keeps StikDebug's connection to *this* app alive; it cannot
+    ///   revive an app iOS has already killed. Requires StikDebug itself to stay
+    ///   running (see `DebugKeepAliveLease`).
+    func keepAppAlive(withBundleID bundleID: String, cancellation: HoldToken, logger: LogFunc?) -> Bool {
+        do {
+            try withConnectedDebugSession { remoteServer, debugProxy in
+                let pid = try withProcessControl(remoteServer: remoteServer) { processControl in
+                    var pid: UInt64 = 0
+                    let ffiError = bundleID.withCString { bundleID in
+                        process_control_launch_app(processControl, bundleID, nil, 0, nil, 0, true, false, &pid)
+                    }
+                    if let ffiError {
+                        throw error(from: ffiError, fallback: "Failed to launch app")
+                    }
+
+                    // Best-effort: lift the memory limit so iOS is less likely to
+                    // jetsam-kill the app while it is in the background.
+                    if let limitError = process_control_disable_memory_limit(processControl, pid) {
+                        let disableError = error(from: limitError, fallback: "Failed to disable memory limit")
+                        emitLog("Keep-alive: could not disable memory limit: \(disableError.localizedDescription)", logger: logger)
+                    }
+
+                    return Int32(truncatingIfNeeded: pid)
+                }
+
+                try holdDebugSession(pid: pid, debugProxy: debugProxy, logger: logger, cancellation: cancellation)
+            }
+
+            emitLog("Keep-alive session ended for \(bundleID)", logger: logger)
+            return true
+        } catch {
+            emitLog("Keep-alive session failed: \(error.localizedDescription)", logger: logger)
+            return false
+        }
+    }
+
+    private func holdDebugSession(pid: Int32, debugProxy: OpaquePointer, logger: LogFunc?, cancellation: HoldToken) throws {
+        debug_proxy_send_ack(debugProxy)
+        debug_proxy_send_ack(debugProxy)
+
+        do {
+            let response = try sendDebugCommand("QStartNoAckMode", debugProxy: debugProxy) ?? "<nil>"
+            emitLog("Keep-alive QStartNoAckMode = \(response)", logger: logger)
+        } catch {
+            emitLog(error.localizedDescription, logger: logger)
+        }
+
+        debug_proxy_set_ack_mode(debugProxy, 0)
+
+        let attachCommand = "vAttach;\(String(UInt32(bitPattern: pid), radix: 16))"
+        let attachResponse = try sendDebugCommand(attachCommand, debugProxy: debugProxy) ?? "<nil>"
+        emitLog("Keep-alive attach response: \(attachResponse)", logger: logger)
+
+        // Keep the RSD/lockdown tunnel trusted for the whole hold.
+        let heartbeat = try? connectHeartbeatKeepAlive(logger: logger)
+        try? heartbeat?.start()
+        defer { heartbeat?.stop() }
+
+        // Continue the (suspended-launched) process so it runs. Sent raw and not
+        // awaited: a debugger-owned, running process is not stopped by iOS when
+        // backgrounded, so there are no stop replies to drain — we just hold the
+        // connection open. Polling a flag (rather than blocking on a socket read)
+        // keeps this single-threaded and cleanly cancellable.
+        sendContinue(debugProxy)
+        emitLog("Keep-alive: app is running and held under the debugger", logger: logger)
+
+        while !cancellation.isCancelled {
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+
+        // Interrupt, then detach, so the app keeps running on its own afterward.
+        var interrupt: UInt8 = 0x03
+        _ = debug_proxy_send_raw(debugProxy, &interrupt, 1)
+        usleep(100_000)
+        do {
+            if let response = try sendDebugCommand("D", debugProxy: debugProxy) {
+                emitLog("Keep-alive detach response: \(response)", logger: logger)
+            }
+        } catch {
+            emitLog(error.localizedDescription, logger: logger)
+        }
+    }
+
+    private func sendContinue(_ debugProxy: OpaquePointer) {
+        // "$c#63" — RSP continue-all-threads packet (valid in no-ack mode).
+        var packet: [UInt8] = [0x24, 0x63, 0x23, 0x36, 0x33]
+        _ = debug_proxy_send_raw(debugProxy, &packet, packet.count)
+    }
+
     func startSyslogRelay(handler: @escaping SyslogLineHandler, onError: @escaping SyslogErrorHandler) {
         do {
             try ensureTunnel()
