@@ -103,6 +103,67 @@ enum SpeedProfile: String, CaseIterable, Identifiable {
     }
 }
 
+enum MapDisplayMode: String, CaseIterable, Identifiable {
+    case standard
+    case satellite
+    case hybrid
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .standard: return "Standard"
+        case .satellite: return "Satellite"
+        case .hybrid: return "Hybrid"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .standard: return "map"
+        case .satellite: return "globe.americas.fill"
+        case .hybrid: return "square.2.layers.3d"
+        }
+    }
+
+    /// Pure satellite imagery can't render traffic or labeled points of interest.
+    var supportsOverlays: Bool {
+        self != .satellite
+    }
+}
+
+enum MapPointsOfInterestMode: String, CaseIterable, Identifiable {
+    case all
+    case transit
+    case hidden
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: return "All Places"
+        case .transit: return "Transit Stops"
+        case .hidden: return "Hidden"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .all: return "mappin.and.ellipse"
+        case .transit: return "bus.fill"
+        case .hidden: return "eye.slash"
+        }
+    }
+
+    var categories: PointOfInterestCategories {
+        switch self {
+        case .all: return .all
+        case .transit: return .including([.publicTransport])
+        case .hidden: return .excludingAll
+        }
+    }
+}
+
 private struct SpeedProfileSettings {
     let profile: SpeedProfile
     let customSpeedMetersPerSecond: CLLocationSpeed
@@ -934,6 +995,11 @@ struct LocationSimulationView: View {
     @State private var showSaveBookmark = false
     @State private var newBookmarkName = ""
 
+    // Map appearance
+    @AppStorage("mapDisplayMode") private var mapDisplayModeRawValue: String = MapDisplayMode.standard.rawValue
+    @AppStorage("mapShowsTraffic") private var mapShowsTraffic: Bool = false
+    @AppStorage("mapPointsOfInterestMode") private var mapPointsOfInterestRawValue: String = MapPointsOfInterestMode.all.rawValue
+
     // Speed profile
     @AppStorage("routeSpeedProfile") private var speedProfileRawValue: String = SpeedProfile.driving.rawValue
     @AppStorage("routeSpeedCustomKmh") private var customSpeedKmh: Double = 30
@@ -941,6 +1007,33 @@ struct LocationSimulationView: View {
     @State private var customSpeedInput = ""
     @State private var lastFallbackSpeed: CLLocationSpeed = RouteSimulationDefaults.importedRouteFallbackSpeedMetersPerSecond
     @State private var isImportedRoute = false
+
+    private var mapDisplayMode: MapDisplayMode {
+        MapDisplayMode(rawValue: mapDisplayModeRawValue) ?? .standard
+    }
+
+    private var mapPointsOfInterestMode: MapPointsOfInterestMode {
+        MapPointsOfInterestMode(rawValue: mapPointsOfInterestRawValue) ?? .all
+    }
+
+    private var mapStyle: MapStyle {
+        switch mapDisplayMode {
+        case .standard:
+            return .standard(
+                elevation: .realistic,
+                pointsOfInterest: mapPointsOfInterestMode.categories,
+                showsTraffic: mapShowsTraffic
+            )
+        case .satellite:
+            return .imagery(elevation: .realistic)
+        case .hybrid:
+            return .hybrid(
+                elevation: .realistic,
+                pointsOfInterest: mapPointsOfInterestMode.categories,
+                showsTraffic: mapShowsTraffic
+            )
+        }
+    }
 
     private var speedProfile: SpeedProfile {
         SpeedProfile(rawValue: speedProfileRawValue) ?? .driving
@@ -1113,7 +1206,7 @@ struct LocationSimulationView: View {
                             .tint(.red)
                     }
                 }
-                .mapStyle(.standard(elevation: .realistic))
+                .mapStyle(mapStyle)
                 .onTapGesture { point in
                     if let loc = proxy.convert(point, from: .local) {
                         applySelection(loc)
@@ -1163,6 +1256,8 @@ struct LocationSimulationView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .topBarLeading) {
+                mapStyleMenu
+
                 Button {
                     showBookmarks = true
                 } label: {
@@ -1510,6 +1605,34 @@ struct LocationSimulationView: View {
                     .disabled(isBusy || isRouteRunning)
             }
         }
+    }
+
+    private var mapStyleMenu: some View {
+        Menu {
+            Picker("Map Type", selection: $mapDisplayModeRawValue) {
+                ForEach(MapDisplayMode.allCases) { mode in
+                    Label(mode.title, systemImage: mode.systemImage)
+                        .tag(mode.rawValue)
+                }
+            }
+
+            if mapDisplayMode.supportsOverlays {
+                Toggle(isOn: $mapShowsTraffic) {
+                    Label("Traffic", systemImage: "car.2.fill")
+                }
+
+                Picker("Points of Interest", selection: $mapPointsOfInterestRawValue) {
+                    ForEach(MapPointsOfInterestMode.allCases) { mode in
+                        Label(mode.title, systemImage: mode.systemImage)
+                            .tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+        } label: {
+            Image(systemName: "map.fill")
+        }
+        .accessibilityLabel("Map style: \(mapDisplayMode.title)")
     }
 
     private var speedProfileMenu: some View {
