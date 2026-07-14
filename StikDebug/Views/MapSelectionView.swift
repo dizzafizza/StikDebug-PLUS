@@ -579,10 +579,16 @@ private struct RouteSpeedIndex {
                 let maxX = Int(floor(max(wayStart.longitude, wayEnd.longitude) / cellSize))
                 let minY = Int(floor(min(wayStart.latitude, wayEnd.latitude) / cellSize))
                 let maxY = Int(floor(max(wayStart.latitude, wayEnd.latitude) / cellSize))
-                // A real road segment spans at most a couple of cells; a huge
-                // span means broken data (e.g. antimeridian jump) — skip it
-                // rather than flooding the index.
-                guard maxX - minX <= 8, maxY - minY <= 8 else { continue }
+                // Most road segments span a cell or two, but sparsely-noded
+                // rural highways can legitimately run tens of km between OSM
+                // geometry points, so allow a generous span (~57 km at the
+                // equator). Anything larger is broken data — e.g. an
+                // antimeridian jump spans ~90,000 cells — and is skipped rather
+                // than flooding the index. The earlier ≤8-cell cap (~3.5 km)
+                // silently dropped those long segments, so those stretches lost
+                // their real speed limit and fell back to average pacing.
+                let maxCellSpan = 128
+                guard maxX - minX <= maxCellSpan, maxY - minY <= maxCellSpan else { continue }
                 for x in minX...maxX {
                     for y in minY...maxY {
                         waySegments[SpatialCellKey(x: x, y: y), default: []].append(segment)
