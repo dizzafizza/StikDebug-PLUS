@@ -15,10 +15,6 @@ struct InstalledAppsListView: View {
     let onSelectApp: (String, String) -> Void
     let showDoneButton: Bool
     let onImportPairingFile: (() -> Void)?
-    /// Called when an app in the "Other" tab is tapped while background
-    /// keep-alive is enabled. When set, tapping holds the app alive instead of
-    /// launching it without a debugger.
-    let onHoldApp: ((String, String) -> Void)?
 
     private let sharedDefaults = UserDefaults(suiteName: ScriptStore.favoriteAppNamesSuiteName) ?? .standard
 
@@ -50,19 +46,11 @@ struct InstalledAppsListView: View {
     init(
         onSelectApp: @escaping (String, String) -> Void,
         showDoneButton: Bool = true,
-        onImportPairingFile: (() -> Void)? = nil,
-        onHoldApp: ((String, String) -> Void)? = nil
+        onImportPairingFile: (() -> Void)? = nil
     ) {
         self.onSelectApp = onSelectApp
         self.showDoneButton = showDoneButton
         self.onImportPairingFile = onImportPairingFile
-        self.onHoldApp = onHoldApp
-    }
-
-    /// Whether tapping an app in the "Other" tab should hold it alive rather
-    /// than launch it without a debugger.
-    private var holdModeEnabled: Bool {
-        keepAppAliveBackground && onHoldApp != nil
     }
 
     var body: some View {
@@ -298,8 +286,11 @@ struct InstalledAppsListView: View {
 
     @ViewBuilder
     private var launchSectionFooter: some View {
-        if holdModeEnabled {
-            Text("Keep-Alive is on: tapping an app holds it alive in the background instead of just launching it.".localized)
+        if keepAppAliveBackground {
+            // These apps lack the get-task-allow entitlement, so a debugger
+            // can't attach to them — which is exactly what keep-alive needs.
+            // Make that clear instead of offering a hold that always fails.
+            Text("Keep-Alive can't hold these apps: they don't allow debugging (no get-task-allow). Only apps in the JIT tab can be held. Tapping here just launches the app.".localized)
         }
     }
 
@@ -311,14 +302,9 @@ struct InstalledAppsListView: View {
                 LaunchAppRow(
                     bundleID: app.bundleID,
                     appName: app.name,
-                    isLaunching: launchingBundles.contains(app.bundleID),
-                    isHoldMode: holdModeEnabled
+                    isLaunching: launchingBundles.contains(app.bundleID)
                 ) {
-                    if holdModeEnabled {
-                        onHoldApp?(app.bundleID, app.name)
-                    } else {
-                        startLaunching(bundleID: app.bundleID, appName: app.name)
-                    }
+                    startLaunching(bundleID: app.bundleID, appName: app.name)
                 }
                 .overlay(alignment: .topTrailing) {
                     if isPinned {

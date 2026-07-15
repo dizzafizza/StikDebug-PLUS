@@ -41,14 +41,7 @@ struct HomeView: View {
             } else {
                 startJITInBackground(bundleID: selectedBundle, displayName: selectedName)
             }
-        }, showDoneButton: false, onImportPairingFile: { isShowingPairingFilePicker = true }, onHoldApp: { selectedBundle, selectedName in
-            // Selecting an app from the "Other" tab while keep-alive is enabled
-            // holds it in the background (and shows the banner) instead of just
-            // launching it — the same behavior as the JIT tab.
-            bundleID = selectedBundle
-            Haptics.medium()
-            startKeepAlive(bundleID: selectedBundle, displayName: selectedName)
-        })
+        }, showDoneButton: false, onImportPairingFile: { isShowingPairingFilePicker = true })
         .overlay(alignment: .top) {
             if let activeApp = aliveManager.activeAppName {
                 keepAliveBanner(appName: activeApp)

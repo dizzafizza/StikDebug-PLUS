@@ -242,7 +242,6 @@ struct LaunchAppRow: View {
     let bundleID: String
     let appName: String
     let isLaunching: Bool
-    let isHoldMode: Bool
     var launchAction: () -> Void
 
     @AppStorage("loadAppIconsOnJIT") private var loadAppIconsOnJIT = true
@@ -252,13 +251,11 @@ struct LaunchAppRow: View {
         bundleID: String,
         appName: String,
         isLaunching: Bool,
-        isHoldMode: Bool = false,
         launchAction: @escaping () -> Void
     ) {
         self.bundleID = bundleID
         self.appName = appName
         self.isLaunching = isLaunching
-        self.isHoldMode = isHoldMode
         self.launchAction = launchAction
         _iconLoader = StateObject(wrappedValue: IconLoader(bundleID: bundleID))
     }
@@ -289,12 +286,12 @@ struct LaunchAppRow: View {
                 if isLaunching {
                     ProgressView().controlSize(.small)
                 } else {
-                    Text((isHoldMode ? "Hold" : "Launch").localized)
+                    Text("Launch".localized)
                         .font(.footnote.weight(.semibold))
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
-                        .background(Capsule().fill((isHoldMode ? Color.green : Color.accentColor).opacity(0.18)))
-                        .foregroundStyle(isHoldMode ? Color.green : Color.accentColor)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.18)))
+                        .foregroundStyle(Color.accentColor)
                 }
             }
             .padding(.vertical, loadAppIconsOnJIT ? 4 : 8)
@@ -309,16 +306,14 @@ struct LaunchAppRow: View {
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(String(format: (isHoldMode ? "Hold %@ alive" : "Launch %@").localized, appName))
+        .accessibilityLabel(String(format: "Launch %@".localized, appName))
         .accessibilityValue(accessibilityValue)
         .accessibilityHint(isLaunching
                            ? "Launch request in progress.".localized
-                           : (isHoldMode
-                              ? "Double-tap to hold this app alive in the background.".localized
-                              : "Double-tap to launch this app without enabling JIT.".localized))
+                           : "Double-tap to launch this app without enabling JIT.".localized)
         .accessibilityAddTraits(.isButton)
         .accessibilityRemoveTraits(.isStaticText)
-        .accessibilityAction(named: Text((isHoldMode ? "Hold App Alive" : "Launch App").localized)) {
+        .accessibilityAction(named: Text("Launch App".localized)) {
             guard !isLaunching else { return }
             launchAction()
         }
