@@ -72,12 +72,7 @@ final class BackgroundAliveManager: ObservableObject {
         lock.unlock()
 
         let name = displayName ?? bundleID
-        DispatchQueue.main.async {
-            self.activeAppName = name
-            // Surface the hold in the Dynamic Island / Lock Screen so it stays
-            // visible while the user is in the held app.
-            KeepAliveLiveActivity.start(appName: name, bundleID: bundleID)
-        }
+        DispatchQueue.main.async { self.activeAppName = name }
         LogManager.shared.addInfoLog("Starting background keep-alive for \(name)")
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -106,7 +101,6 @@ final class BackgroundAliveManager: ObservableObject {
             DispatchQueue.main.async {
                 if stillCurrent {
                     self.activeAppName = nil
-                    KeepAliveLiveActivity.end()
                 }
                 if !succeeded {
                     showAlert(

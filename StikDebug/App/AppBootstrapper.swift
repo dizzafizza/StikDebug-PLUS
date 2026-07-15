@@ -13,9 +13,6 @@ enum AppBootstrapper {
         startConfiguredKeepAliveServices()
         applyDocumentPickerCopyWorkaround()
         NetworkPathMonitor.shared.start()
-        // No hold is active at launch, so clear any Live Activity a previous
-        // (possibly force-quit) run left showing in the Dynamic Island.
-        KeepAliveLiveActivity.endStaleActivities()
     }
 
     private static func registerDefaultSettings() {

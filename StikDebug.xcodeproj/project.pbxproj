@@ -9,7 +9,6 @@
 /* Begin PBXBuildFile section */
 		68D569BE2E1B415700A5BA36 /* CodeEditorView in Frameworks */ = {isa = PBXBuildFile; productRef = 68D569BD2E1B415700A5BA36 /* CodeEditorView */; };
 		68D569C02E1B415700A5BA36 /* LanguageSupport in Frameworks */ = {isa = PBXBuildFile; productRef = 68D569BF2E1B415700A5BA36 /* LanguageSupport */; };
-		F00DCAFE000000000000E00B /* StikDebugWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = F00DCAFE000000000000E002 /* StikDebugWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -27,13 +26,6 @@
 			remoteGlobalIDString = DC6F1D362D94EADD0071B2B6;
 			remoteInfo = StikDebug;
 		};
-		F00DCAFE000000000000E00D /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = DC6F1D2F2D94EADD0071B2B6 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = F00DCAFE000000000000E001;
-			remoteInfo = StikDebugWidgets;
-		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -43,7 +35,6 @@
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				F00DCAFE000000000000E00B /* StikDebugWidgets.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -56,7 +47,6 @@
 		DC6F1D372D94EADD0071B2B6 /* StikDebug.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StikDebug.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DC6F1D482D94EADF0071B2B6 /* StikDebugTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = StikDebugTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		DC6F1D522D94EADF0071B2B6 /* StikDebugUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = StikDebugUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		F00DCAFE000000000000E002 /* StikDebugWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = StikDebugWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -67,13 +57,6 @@
 			);
 			target = DC6F1D362D94EADD0071B2B6 /* StikDebug */;
 		};
-		F00DCAFE000000000000E00E /* Exceptions for "StikDebugWidgets" folder in "StikDebugWidgets" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-			);
-			target = F00DCAFE000000000000E001 /* StikDebugWidgets */;
-		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -83,19 +66,6 @@
 				1775D3612D9644FD00DFA8E0 /* Exceptions for "StikDebug" folder in "StikDebug" target */,
 			);
 			path = StikDebug;
-			sourceTree = "<group>";
-		};
-		F00DCAFE000000000000E006 /* StikDebugWidgets */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				F00DCAFE000000000000E00E /* Exceptions for "StikDebugWidgets" folder in "StikDebugWidgets" target */,
-			);
-			path = StikDebugWidgets;
-			sourceTree = "<group>";
-		};
-		F00DCAFE000000000000E007 /* StikDebugShared */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = StikDebugShared;
 			sourceTree = "<group>";
 		};
 		DC6F1D4B2D94EADF0071B2B6 /* StikDebugTests */ = {
@@ -134,13 +104,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		F00DCAFE000000000000E004 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -148,8 +111,6 @@
 			isa = PBXGroup;
 			children = (
 				DC6F1D392D94EADD0071B2B6 /* StikDebug */,
-				F00DCAFE000000000000E007 /* StikDebugShared */,
-				F00DCAFE000000000000E006 /* StikDebugWidgets */,
 				DC6F1D4B2D94EADF0071B2B6 /* StikDebugTests */,
 				DC6F1D552D94EADF0071B2B6 /* StikDebugUITests */,
 				DC6F1D752D94EB620071B2B6 /* Frameworks */,
@@ -163,7 +124,6 @@
 				DC6F1D372D94EADD0071B2B6 /* StikDebug.app */,
 				DC6F1D482D94EADF0071B2B6 /* StikDebugTests.xctest */,
 				DC6F1D522D94EADF0071B2B6 /* StikDebugUITests.xctest */,
-				F00DCAFE000000000000E002 /* StikDebugWidgets.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -192,11 +152,9 @@
 			buildRules = (
 			);
 			dependencies = (
-				F00DCAFE000000000000E00C /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				DC6F1D392D94EADD0071B2B6 /* StikDebug */,
-				F00DCAFE000000000000E007 /* StikDebugShared */,
 			);
 			name = StikDebug;
 			packageProductDependencies = (
@@ -206,29 +164,6 @@
 			productName = StikDebug;
 			productReference = DC6F1D372D94EADD0071B2B6 /* StikDebug.app */;
 			productType = "com.apple.product-type.application";
-		};
-		F00DCAFE000000000000E001 /* StikDebugWidgets */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = F00DCAFE000000000000E008 /* Build configuration list for PBXNativeTarget "StikDebugWidgets" */;
-			buildPhases = (
-				F00DCAFE000000000000E003 /* Sources */,
-				F00DCAFE000000000000E004 /* Frameworks */,
-				F00DCAFE000000000000E005 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			fileSystemSynchronizedGroups = (
-				F00DCAFE000000000000E006 /* StikDebugWidgets */,
-				F00DCAFE000000000000E007 /* StikDebugShared */,
-			);
-			name = StikDebugWidgets;
-			packageProductDependencies = (
-			);
-			productName = StikDebugWidgets;
-			productReference = F00DCAFE000000000000E002 /* StikDebugWidgets.appex */;
-			productType = "com.apple.product-type.app-extension";
 		};
 		DC6F1D472D94EADF0071B2B6 /* StikDebugTests */ = {
 			isa = PBXNativeTarget;
@@ -298,9 +233,6 @@
 						CreatedOnToolsVersion = 16.2;
 						TestTargetID = DC6F1D362D94EADD0071B2B6;
 					};
-					F00DCAFE000000000000E001 = {
-						CreatedOnToolsVersion = 16.2;
-					};
 				};
 			};
 			buildConfigurationList = DC6F1D322D94EADD0071B2B6 /* Build configuration list for PBXProject "StikDebug" */;
@@ -323,7 +255,6 @@
 			projectRoot = "";
 			targets = (
 				DC6F1D362D94EADD0071B2B6 /* StikDebug */,
-				F00DCAFE000000000000E001 /* StikDebugWidgets */,
 				DC6F1D472D94EADF0071B2B6 /* StikDebugTests */,
 				DC6F1D512D94EADF0071B2B6 /* StikDebugUITests */,
 			);
@@ -346,13 +277,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		DC6F1D502D94EADF0071B2B6 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		F00DCAFE000000000000E005 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -383,13 +307,6 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		F00DCAFE000000000000E003 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -402,11 +319,6 @@
 			isa = PBXTargetDependency;
 			target = DC6F1D362D94EADD0071B2B6 /* StikDebug */;
 			targetProxy = DC6F1D532D94EADF0071B2B6 /* PBXContainerItemProxy */;
-		};
-		F00DCAFE000000000000E00C /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = F00DCAFE000000000000E001 /* StikDebugWidgets */;
-			targetProxy = F00DCAFE000000000000E00D /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -756,64 +668,6 @@
 			};
 			name = Release;
 		};
-		F00DCAFE000000000000E009 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = StikDebugWidgets/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = StikDebug;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 3.1.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.stik.stikdebug.widgets;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Debug;
-		};
-		F00DCAFE000000000000E00A /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = StikDebugWidgets/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = StikDebug;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@executable_path/../../Frameworks",
-				);
-				MARKETING_VERSION = 3.1.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.stik.stikdebug.widgets;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = auto;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-			};
-			name = Release;
-		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -849,15 +703,6 @@
 			buildConfigurations = (
 				DC6F1D632D94EADF0071B2B6 /* Debug */,
 				DC6F1D642D94EADF0071B2B6 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		F00DCAFE000000000000E008 /* Build configuration list for PBXNativeTarget "StikDebugWidgets" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				F00DCAFE000000000000E009 /* Debug */,
-				F00DCAFE000000000000E00A /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
