@@ -1436,6 +1436,7 @@ struct LocationSimulationView: View {
     @State private var routePolyline: MKPolyline?
     @State private var routePlaybackSamples: [RoutePlaybackSample] = []
     @State private var routeBusStops: [CLLocationCoordinate2D] = []
+    @State private var visibleLatitudeDelta: CLLocationDegrees = 0.05
     @State private var routePlaybackCoordinate: CLLocationCoordinate2D?
     @State private var simulatedCoordinate: CLLocationCoordinate2D?
     @State private var routeRequestID = UUID()
@@ -1492,6 +1493,29 @@ struct LocationSimulationView: View {
                 showsTraffic: mapShowsTraffic
             )
         }
+    }
+
+    /// Bus stop markers to actually draw on the map. Two adjustments on top of
+    /// the raw fetched `routeBusStops`:
+    ///
+    /// - Honors "Points of Interest: Hidden" — the stops are drawn as our own
+    ///   Marker overlay, not Apple's native POI layer, so Apple's
+    ///   `pointsOfInterest` style option (set from the same picker) has no
+    ///   effect on them; that had to be handled here explicitly.
+    /// - Thins markers as the map zooms out, since a bus route easily has
+    ///   dozens of stops that overlap into an unreadable stack of pins at a
+    ///   city-wide zoom. Spacing scales with the visible latitude span so
+    ///   roughly the same number of markers are visible on screen at any
+    ///   zoom level; the full-fidelity `routeBusStops` list (used for dwell
+    ///   pacing during playback) is untouched.
+    private var displayedBusStops: [CLLocationCoordinate2D] {
+        guard speedProfile == .bus, mapPointsOfInterestMode != .hidden else { return [] }
+        let visibleSpanMeters = visibleLatitudeDelta * 111_320
+        let minimumSpacing = max(
+            SpeedProfileSettings.busStopSnapRadius,
+            visibleSpanMeters / 25
+        )
+        return dedupedBusStops(routeBusStops, radius: minimumSpacing)
     }
 
     private var speedProfile: SpeedProfile {
@@ -1648,11 +1672,9 @@ struct LocationSimulationView: View {
                             MapPolyline(routePolyline)
                                 .stroke(.blue.opacity(0.8), lineWidth: 5)
                         }
-                        if speedProfile == .bus {
-                            ForEach(Array(routeBusStops.enumerated()), id: \.offset) { _, stop in
-                                Marker("Bus Stop", systemImage: "bus.fill", coordinate: stop)
-                                    .tint(.orange)
-                            }
+                        ForEach(Array(displayedBusStops.enumerated()), id: \.offset) { _, stop in
+                            Marker("Bus Stop", systemImage: "bus.fill", coordinate: stop)
+                                .tint(.orange)
                         }
                         if let routeStartCoordinate {
                             Marker("Start", coordinate: routeStartCoordinate)
@@ -1679,6 +1701,9 @@ struct LocationSimulationView: View {
                 }
                 .mapControls {
                     MapCompass()
+                }
+                .onMapCameraChange(frequency: .onEnd) { context in
+                    visibleLatitudeDelta = context.region.span.latitudeDelta
                 }
             }
                 .ignoresSafeArea()
