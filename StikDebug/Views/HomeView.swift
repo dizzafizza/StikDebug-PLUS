@@ -291,9 +291,17 @@ struct HomeView: View {
             )
             return
         }
+        // Resolve the app's assigned JIT script the same way a normal JIT run
+        // does, so the script also runs in hold mode instead of only attaching.
+        var script: DebugAppCallback? = nil
+        if ProcessInfo.processInfo.hasTXM,
+           let preferred = ScriptStore.preferredScript(for: bundleID) {
+            script = getJsCallback(preferred.data, name: preferred.name)
+        }
+
         let startingMessage = String(format: "Keeping %@ alive in the background".localized, name)
         AccessibilityAnnouncer.announce(startingMessage)
-        BackgroundAliveManager.shared.start(bundleID: bundleID, displayName: displayName)
+        BackgroundAliveManager.shared.start(bundleID: bundleID, displayName: displayName, script: script)
     }
 
     private func debugFeedbackView(_ feedback: DebugFeedback) -> some View {

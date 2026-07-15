@@ -48,7 +48,10 @@ final class BackgroundAliveManager: ObservableObject {
         return activeBundleID != nil
     }
 
-    func start(bundleID: String, displayName: String?) {
+    /// - Parameter script: Optional JIT-script callback to run once (after
+    ///   attach, before the hold begins) so the app's assigned script executes
+    ///   in hold mode just like it does for a normal JIT run.
+    func start(bundleID: String, displayName: String?, script: DebugAppCallback? = nil) {
         lock.lock()
         guard activeBundleID == nil else {
             lock.unlock()
@@ -76,6 +79,7 @@ final class BackgroundAliveManager: ObservableObject {
 
             let succeeded = JITEnableContext.shared.keepAppAlive(
                 withBundleID: bundleID,
+                script: script,
                 cancellation: token,
                 logger: logger
             )
