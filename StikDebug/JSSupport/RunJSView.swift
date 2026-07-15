@@ -69,7 +69,7 @@ final class RunJSViewModel: ObservableObject, Identifiable, @unchecked Sendable 
         
         let logFunction: @convention(block) (String) -> Void = { logStr in
             DispatchQueue.main.async {
-                self.logs.append(logStr)
+                self.appendLog(logStr)
             }
         }
         
@@ -111,13 +111,27 @@ final class RunJSViewModel: ObservableObject, Identifiable, @unchecked Sendable 
 
         DispatchQueue.main.async {
             if let exception = self.context?.exception {
-                self.logs.append(exception.debugDescription)
+                self.appendLog(exception.debugDescription)
             }
-            self.logs.append("Script Execution Completed")
-            self.logs.append("You are safe to close this window.")
+            self.appendLog("Script Execution Completed")
+            self.appendLog("You are safe to close this window.")
         }
     }
-    
+
+    /// Appends a log line, keeping the buffer bounded. A hold-mode script (e.g.
+    /// universal.js) can run indefinitely and log on every iteration; without a
+    /// cap the `@Published` array — and the SwiftUI list bound to it — grows
+    /// without bound and eventually exhausts memory. Must run on the main thread.
+    private func appendLog(_ entry: String) {
+        logs.append(entry)
+        if logs.count > Self.maxLogEntries + Self.logTrimSlack {
+            logs.removeFirst(logs.count - Self.maxLogEntries)
+        }
+    }
+
+    private static let maxLogEntries = 1000
+    private static let logTrimSlack = 256
+
     private func captureScreenshot(named preferredName: String?) -> String {
         if executionInterrupted {
             raiseException("Script execution is interrupted by StikDebug.")

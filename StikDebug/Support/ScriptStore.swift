@@ -72,15 +72,17 @@ enum ScriptStore {
         assignedScript(for: bundleID, fileManager: fileManager) ?? autoScript(for: bundleID, fileManager: fileManager)
     }
 
-    /// The JIT script to run when holding an app alive in the background.
+    /// The JIT script to run while holding an app alive in the background, or
+    /// `nil` to hold the app with a plain debugger attach.
     ///
-    /// On a TXM device (iOS 26+) JIT is serviced by handling `brk #0xf00d`
-    /// syscalls, so an app that is merely attached — with no script servicing
-    /// those traps — hangs the moment it requests executable memory. That is
-    /// why keep-alive "didn't work for any app": only apps whose name/bundle
-    /// matched an assigned or auto script got a callback. Fall back to the
-    /// bundled universal script so *any* app has its JIT traps serviced (and,
-    /// for non-JIT apps, its debug connection actively held) while alive.
+    /// Only apps with a user-assigned or name-matched (known JIT app) script get
+    /// a script. Those apps request executable memory via `brk #0xf00d` syscalls
+    /// that the script must service, so without it they hang. Apps that do *not*
+    /// use JIT — e.g. Roblox and most games — are deliberately held with a plain
+    /// attach instead: running the JIT breakpoint handler against them makes it
+    /// chase every signal the app raises across all of its threads, which floods
+    /// the log (and can crash a large multi-threaded app or StikDebug itself). A
+    /// plain attach keeps them alive in the background without interfering.
     ///
     /// Returns `nil` on non-TXM devices, where JIT comes from `CS_DEBUGGED`
     /// alone and a plain attach is enough to hold the app.
@@ -89,24 +91,7 @@ enum ScriptStore {
             return nil
         }
 
-        if let preferred = preferredScript(for: bundleID, fileManager: fileManager) {
-            return preferred
-        }
-
-        return bundledScript(resourceName: "universal", fileName: "universal.js")
-    }
-
-    /// Reads a bundled script straight from the app bundle (not the user's
-    /// scripts directory). Used for the keep-alive fallback so the current
-    /// shipped script — which supports `should_continue()` cancellation — is
-    /// always used, even for users whose documents copy predates it.
-    private static func bundledScript(resourceName: String, fileName: String) -> (data: Data, name: String)? {
-        guard let bundleURL = Bundle.main.url(forResource: resourceName, withExtension: "js"),
-              let data = try? Data(contentsOf: bundleURL) else {
-            return nil
-        }
-
-        return (data, fileName)
+        return preferredScript(for: bundleID, fileManager: fileManager)
     }
 
     static func favoriteAppName(
