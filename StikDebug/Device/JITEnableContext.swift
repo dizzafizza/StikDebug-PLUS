@@ -764,50 +764,24 @@ final class JITEnableContext {
             return
         }
 
-        // No script: hold the app by attaching and *actively servicing* the
-        // debug connection. A debugger-owned process is not suspended by iOS in
-        // the background — but a debugged process also stops on every signal or
-        // exception, and if we never answer those stops it stays halted on the
-        // first one, can't service its own run loop, and iOS's watchdog kills it
-        // (which is what looked like the app "crashing" / keep-alive not
-        // working). So we continue on each stop, forwarding real signals so the
-        // app behaves exactly as if it were not being debugged, and keep going
-        // until the app exits or the user stops the hold.
+        // No script (older devices where JIT is enabled simply by CS_DEBUGGED):
+        // attach to set CS_DEBUGGED, then continue so the app runs. Sent raw and
+        // not awaited: a debugger-owned, running process is not stopped by iOS
+        // when backgrounded, so there are no stop replies to drain — we just hold
+        // the connection open until the user stops it.
         let attachCommand = "vAttach;\(String(UInt32(bitPattern: pid), radix: 16))"
-        var stopReply = try sendDebugCommand(attachCommand, debugProxy: debugProxy) ?? ""
-        emitLog("Keep-alive attach response: \(stopReply)", logger: logger)
+        let attachResponse = try sendDebugCommand(attachCommand, debugProxy: debugProxy) ?? "<nil>"
+        emitLog("Keep-alive attach response: \(attachResponse)", logger: logger)
+        sendContinue(debugProxy)
         emitLog("Keep-alive: app is running and held under the debugger", logger: logger)
 
-        // Cancellation is re-checked after each stop. While the app runs, the
-        // continue blocks reading the socket — single-threaded, so there is no
-        // concurrent access to the (non-thread-safe) debug proxy. The hold also
-        // ends by itself when the app exits (the natural end when the user
-        // closes it).
+        // Polling a flag (rather than blocking on a socket read) keeps this
+        // single-threaded and cleanly cancellable.
         while !cancellation.isCancelled {
-            // A process-exit reply ("W"/"X") means the app is gone — nothing
-            // left to hold or detach.
-            if stopReply.hasPrefix("W") || stopReply.hasPrefix("X") {
-                emitLog("Keep-alive: app exited (\(stopReply)); ending hold", logger: logger)
-                return
-            }
-
-            do {
-                stopReply = try sendDebugCommand(holdContinueCommand(forStopReply: stopReply), debugProxy: debugProxy) ?? ""
-            } catch {
-                // The connection dropped — the app was killed or the tunnel
-                // died. Stop holding; there is nothing to detach from.
-                emitLog("Keep-alive: debug connection ended (\(error.localizedDescription)); ending hold", logger: logger)
-                return
-            }
-
-            if stopReply.isEmpty {
-                emitLog("Keep-alive: empty stop reply; ending hold", logger: logger)
-                return
-            }
+            Thread.sleep(forTimeInterval: 0.5)
         }
 
-        // Cancelled by the user: interrupt, then detach, so the app keeps
-        // running on its own afterward.
+        // Interrupt, then detach, so the app keeps running on its own afterward.
         var interrupt: UInt8 = 0x03
         _ = debug_proxy_send_raw(debugProxy, &interrupt, 1)
         usleep(100_000)
@@ -820,23 +794,10 @@ final class JITEnableContext {
         }
     }
 
-    /// The continue command used to resume a held app after it stops. Real
-    /// signals are forwarded (`C<sig>`) so the app behaves as if it were not
-    /// under a debugger; debugger artifacts — the SIGSTOP from attaching and
-    /// SIGTRAP traps — are swallowed with a plain continue so they don't
-    /// immediately re-stop or re-trap the app.
-    private func holdContinueCommand(forStopReply reply: String) -> String {
-        guard reply.hasPrefix("T"), reply.count >= 3,
-              let signal = UInt8(reply.dropFirst().prefix(2), radix: 16) else {
-            return "c"
-        }
-
-        switch Int32(signal) {
-        case 0, SIGSTOP, SIGTRAP:
-            return "c"
-        default:
-            return String(format: "C%02x", signal)
-        }
+    private func sendContinue(_ debugProxy: OpaquePointer) {
+        // "$c#63" — RSP continue-all-threads packet (valid in no-ack mode).
+        var packet: [UInt8] = [0x24, 0x63, 0x23, 0x36, 0x33]
+        _ = debug_proxy_send_raw(debugProxy, &packet, UInt(packet.count))
     }
 
     func startSyslogRelay(handler: @escaping SyslogLineHandler, onError: @escaping SyslogErrorHandler) {
