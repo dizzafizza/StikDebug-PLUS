@@ -219,20 +219,30 @@ private enum OpenStreetMapSpeedLimitService {
     static let copyrightURL = URL(string: "https://www.openstreetmap.org/copyright")!
     static let nearestWayThreshold: CLLocationDistance = 40
 
-    // Corridor query tuning. Rather than one all-or-nothing query over the
-    // whole route (which embedded the corridor once per clause and timed out on
-    // long routes, losing every stop and speed limit at once), the corridor is
-    // split into small chunks fetched as independent requests: each is cheap
-    // enough to finish well inside its timeout, a failed chunk only loses its
-    // own stretch of road, and bus stops stream onto the map as chunks arrive.
-    static let corridorMinSpacing: CLLocationDistance = 75    // downsample step
-    static let chunkMaxPoints = 160                           // ≈12 km of route per request
-    static let maxChunkCount = 24                             // spacing widens past ~285 km
-    static let maxConcurrentChunkRequests = 2                 // public Overpass allows 2 slots/IP
-    static let corridorWayRadius: CLLocationDistance = 60     // road search radius
-    static let corridorBusStopRadius: CLLocationDistance = 90 // stop search radius
-    static let chunkServerTimeout: TimeInterval = 15          // Overpass-side [timeout:]
-    static let requestTimeout: TimeInterval = 20              // client-side, per chunk
+    // Route chunking. The whole route is split into ~5 km chunks fetched as
+    // independent requests, each queried by its own small bounding box rather
+    // than an `around(radius, points…)` list. `around` costs scale with
+    // points-in-list × candidate-elements-in-area and reliably blew past the
+    // server timeout on anything but the shortest stretches — measured
+    // 16-23s (or outright timeout) for a dense-area chunk that a bbox query
+    // resolved in 3-8s for the same area. A bbox test is an O(1) rectangle
+    // check per candidate regardless of the route's shape, so cost no longer
+    // scales with corridor point density — the actual cause of stops loading
+    // inconsistently (denser areas or longer stretches pushed the old query
+    // past its timeout more often, but never predictably).
+    static let chunkTargetDistance: CLLocationDistance = 5_000 // ~5 km of route per request
+    static let maxChunkCount = 80                              // caps requests on very long routes
+    static let maxConcurrentChunkRequests = 3
+    // Padding around each chunk's tight point bbox. Comfortably larger than
+    // the client-side match thresholds below (40 m ways / 90 m stops) so nothing
+    // near the edge of a chunk is missed by the coarse server-side box.
+    static let chunkBBoxPadding: CLLocationDistance = 120
+    static let chunkServerTimeout: TimeInterval = 20           // Overpass-side [timeout:]
+    static let requestTimeout: TimeInterval = 30               // client-side, per chunk;
+                                                                // must exceed the server timeout with
+                                                                // margin — Overpass still takes several
+                                                                // seconds to flush its own timeout reply
+    static let chunkRetryAttempts = 2                          // total tries per chunk before giving up
 
     // Physical stops are often mapped twice (platform + stop_position a few
     // meters apart); merge anything closer than this so markers and dwells
@@ -263,6 +273,12 @@ private struct SpatialCellKey: Hashable {
 
 private struct OverpassResponse: Decodable {
     let elements: [Element]
+    // Present only on a server-side problem (e.g. "runtime error: Query timed
+    // out…"), never on a clean result. Overpass replies HTTP 200 with an empty
+    // `elements` array in this case rather than an error status, so without
+    // checking this field a timed-out chunk looked identical to "no data near
+    // this stretch of route" — the actual cause of stops loading inconsistently.
+    let remark: String?
 
     struct Element: Decodable {
         let id: Int?
@@ -405,98 +421,103 @@ private func speedLimitMetersPerSecond(from tags: [String: String]) -> CLLocatio
     return directionalValues.min()
 }
 
-/// Reduce a dense (≈10 m) route to a sparse set of points spaced at least
-/// `minimumSpacing` apart, capped at `maximumPointCount`. Used to keep the
-/// Overpass `around` query small while still tracing the whole route.
-private func corridorCoordinates(
-    from coordinates: [CLLocationCoordinate2D],
-    minimumSpacing: CLLocationDistance,
-    maximumPointCount: Int
-) -> [CLLocationCoordinate2D] {
-    guard coordinates.count > 2 else { return coordinates }
+/// Split the route into chunks of about `chunkTargetDistance` real-world
+/// meters each (walked along the polyline, not raw point count), capped at
+/// `maxChunkCount` chunks so an extremely long route still bounds the number
+/// of requests made. Consecutive chunks share one boundary point so nothing
+/// near a seam falls outside every chunk's bounding box.
+private func routeChunks(from coordinates: [CLLocationCoordinate2D]) -> [[CLLocationCoordinate2D]] {
+    guard coordinates.count > 1 else { return [] }
 
     let totalDistance = distanceAlong(coordinates)
-    let spacing = max(minimumSpacing, totalDistance / Double(max(1, maximumPointCount - 1)))
+    let chunkDistance = max(
+        OpenStreetMapSpeedLimitService.chunkTargetDistance,
+        totalDistance / Double(OpenStreetMapSpeedLimitService.maxChunkCount)
+    )
 
-    var result: [CLLocationCoordinate2D] = [coordinates[0]]
+    var chunks: [[CLLocationCoordinate2D]] = []
+    var current: [CLLocationCoordinate2D] = [coordinates[0]]
     var accumulated: CLLocationDistance = 0
-    var previous = coordinates[0]
 
-    for coordinate in coordinates.dropFirst() {
+    for (previous, point) in zip(coordinates, coordinates.dropFirst()) {
         accumulated += CLLocation(latitude: previous.latitude, longitude: previous.longitude)
-            .distance(from: CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude))
-        previous = coordinate
-        if accumulated >= spacing {
-            result.append(coordinate)
+            .distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
+        current.append(point)
+        if accumulated >= chunkDistance {
+            chunks.append(current)
+            current = [point] // shared boundary point, so no coverage gap at the seam
             accumulated = 0
         }
     }
-
-    if let last = coordinates.last,
-       result.last.map(CoordinateSnapshot.init) != CoordinateSnapshot(last) {
-        result.append(last)
-    }
-
-    return result
-}
-
-private func overpassCorridorString(_ coordinates: [CLLocationCoordinate2D]) -> String {
-    coordinates
-        .map { String(format: "%.5f,%.5f", $0.latitude, $0.longitude) }
-        .joined(separator: ",")
-}
-
-/// Downsample the route once, then split the corridor into chunks that each
-/// fit a small, fast Overpass request. Consecutive chunks share one boundary
-/// point, so an element near a seam is always within at least one chunk's
-/// search radius (chunk overlap + per-element dedup keep results exact).
-private func corridorChunks(from coordinates: [CLLocationCoordinate2D]) -> [[CLLocationCoordinate2D]] {
-    let corridor = corridorCoordinates(
-        from: coordinates,
-        minimumSpacing: OpenStreetMapSpeedLimitService.corridorMinSpacing,
-        maximumPointCount: OpenStreetMapSpeedLimitService.chunkMaxPoints
-            * OpenStreetMapSpeedLimitService.maxChunkCount
-    )
-    guard !corridor.isEmpty else { return [] }
-
-    let chunkSize = OpenStreetMapSpeedLimitService.chunkMaxPoints
-    guard corridor.count > chunkSize else { return [corridor] }
-
-    var chunks: [[CLLocationCoordinate2D]] = []
-    var start = 0
-    while start < corridor.count - 1 {
-        let end = min(start + chunkSize, corridor.count)
-        chunks.append(Array(corridor[start..<end]))
-        start = end - 1 // share the boundary point with the next chunk
+    if current.count > 1 {
+        chunks.append(current)
     }
     return chunks
 }
 
-private func overpassChunkQuery(for corridor: [CLLocationCoordinate2D], includeBusStops: Bool) -> String? {
-    guard !corridor.isEmpty else { return nil }
+private struct ChunkBoundingBox {
+    let south: Double
+    let west: Double
+    let north: Double
+    let east: Double
+}
 
-    let coordString = overpassCorridorString(corridor)
-    let wayRadius = Int(OpenStreetMapSpeedLimitService.corridorWayRadius.rounded())
+/// Tight bounding box of `coordinates`, padded by `paddingMeters`. Since a
+/// straight segment between two consecutive route points lies within their
+/// combined bbox, padding the point-only bbox by at least the largest
+/// client-side match radius guarantees nothing near the true path is missed.
+private func boundingBox(for coordinates: [CLLocationCoordinate2D], paddingMeters: CLLocationDistance) -> ChunkBoundingBox? {
+    guard let first = coordinates.first else { return nil }
+
+    var minLatitude = first.latitude
+    var maxLatitude = first.latitude
+    var minLongitude = first.longitude
+    var maxLongitude = first.longitude
+
+    for coordinate in coordinates.dropFirst() {
+        minLatitude = min(minLatitude, coordinate.latitude)
+        maxLatitude = max(maxLatitude, coordinate.latitude)
+        minLongitude = min(minLongitude, coordinate.longitude)
+        maxLongitude = max(maxLongitude, coordinate.longitude)
+    }
+
+    let midLatitudeRadians = (minLatitude + maxLatitude) / 2 * .pi / 180
+    let latitudePadding = paddingMeters / 111_320
+    let longitudePadding = paddingMeters / (111_320 * max(cos(midLatitudeRadians), 0.01))
+
+    return ChunkBoundingBox(
+        south: minLatitude - latitudePadding,
+        west: minLongitude - longitudePadding,
+        north: maxLatitude + latitudePadding,
+        east: maxLongitude + longitudePadding
+    )
+}
+
+private func overpassChunkQuery(forBoundingBox bbox: ChunkBoundingBox, includeBusStops: Bool) -> String {
+    let bboxString = String(format: "%.6f,%.6f,%.6f,%.6f", bbox.south, bbox.west, bbox.north, bbox.east)
 
     // Bus stops are mapped inconsistently in OSM: the legacy `highway=bus_stop`
     // tag, and the newer public_transport schema (platform / stop_position with
-    // `bus=yes`). One regex clause pulls that superset in a single `around`
-    // pass — repeating the corridor once per tag variant tripled the server-side
-    // cost — and `tagsDescribeBusStop` keeps only real bus stops client-side.
+    // `bus=yes`). One regex clause pulls that superset in a single pass —
+    // `tagsDescribeBusStop` keeps only real bus stops client-side.
     var busStopClause = ""
     if includeBusStops {
-        let stopRadius = Int(OpenStreetMapSpeedLimitService.corridorBusStopRadius.rounded())
         busStopClause = """
 
-          node(around:\(stopRadius),\(coordString))[~"^(highway|public_transport)$"~"^(bus_stop|platform|stop_position)$"];
+          node(\(bboxString))[~"^(highway|public_transport)$"~"^(bus_stop|platform|stop_position)$"];
         """
     }
 
-    // `around` selects only elements near this stretch of the route, so each
-    // chunk's response stays small regardless of total route length.
+    // A bounding-box filter is an O(1) rectangle test per candidate element,
+    // independent of the chunk's shape or point density — unlike `around`
+    // with a point list, whose cost scales with points × candidates and
+    // reliably exceeded the server timeout on anything but the shortest
+    // stretches. Extra candidates a loose box admits are rejected client-side
+    // by `nearestWayThreshold` / `hasBusStop(within:)`, so precision is
+    // unaffected.
     return """
     [out:json][timeout:\(Int(OpenStreetMapSpeedLimitService.chunkServerTimeout))];
-    way(around:\(wayRadius),\(coordString))[highway]->.roads;
+    way(\(bboxString))[highway]->.roads;
     (
       way.roads[maxspeed];
       way.roads["maxspeed:forward"];
@@ -523,16 +544,15 @@ private struct OverpassChunkResult {
 }
 
 private func fetchSpeedContextChunk(
-    corridor: [CLLocationCoordinate2D],
+    bbox: ChunkBoundingBox,
     includeBusStops: Bool
 ) async throws -> OverpassChunkResult {
-    guard let query = overpassChunkQuery(for: corridor, includeBusStops: includeBusStops) else {
-        return OverpassChunkResult(ways: [], busStops: [])
-    }
+    let query = overpassChunkQuery(forBoundingBox: bbox, includeBusStops: includeBusStops)
 
-    // POST the query: corridor strings can exceed URL limits as a GET. The
-    // explicit timeout keeps a slow Overpass server from stalling this chunk —
-    // a failed chunk only costs its own stretch of road data.
+    // POST the query: this stays small since the request body is now just a
+    // bbox rather than a whole corridor of points. The explicit timeout keeps
+    // a slow Overpass server from stalling this chunk — a failed chunk only
+    // costs its own stretch of road data.
     var request = URLRequest(url: OpenStreetMapSpeedLimitService.endpoint)
     request.httpMethod = "POST"
     request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
@@ -555,6 +575,18 @@ private func fetchSpeedContextChunk(
     }
 
     let decoded = try JSONDecoder().decode(OverpassResponse.self, from: data)
+
+    // Overpass replies HTTP 200 with an empty `elements` array and a `remark`
+    // when it hits its own timeout or otherwise can't complete the query —
+    // treat that the same as a network failure (retryable) rather than
+    // silently accepting "no data found here".
+    if let remark = decoded.remark {
+        throw NSError(
+            domain: "OpenStreetMapSpeedLimits",
+            code: -2,
+            userInfo: [NSLocalizedDescriptionKey: "Overpass reported an error for this chunk: \(remark)"]
+        )
+    }
 
     let ways: [(id: Int, value: OpenStreetMapWay)] = decoded.elements.compactMap { element in
         guard let id = element.id,
@@ -582,6 +614,27 @@ private func fetchSpeedContextChunk(
     }
 
     return OverpassChunkResult(ways: ways, busStops: busStops)
+}
+
+/// Retries a chunk fetch on failure (network error, HTTP error, or a
+/// server-side timeout surfaced via `remark`) with a short backoff — the
+/// public Overpass instance is a shared, load-dependent resource, so a single
+/// slow response shouldn't cost that stretch of the route its data. Returns
+/// `nil` only once every attempt has failed.
+private func fetchSpeedContextChunkWithRetry(
+    bbox: ChunkBoundingBox,
+    includeBusStops: Bool
+) async -> OverpassChunkResult? {
+    let maxAttempts = OpenStreetMapSpeedLimitService.chunkRetryAttempts
+    for attempt in 1...maxAttempts {
+        do {
+            return try await fetchSpeedContextChunk(bbox: bbox, includeBusStops: includeBusStops)
+        } catch {
+            guard attempt < maxAttempts else { return nil }
+            try? await Task.sleep(for: .seconds(Double(attempt) * 1.5))
+        }
+    }
+    return nil
 }
 
 /// Merge stops closer together than `radius` — a stop's platform and
@@ -632,20 +685,22 @@ private func dedupedBusStops(
 
 /// Fetches road speed limits (and optionally bus stops) along the route.
 ///
-/// The corridor is fetched as independent chunks, at most
-/// `maxConcurrentChunkRequests` in flight, deduplicated by OSM element id
-/// (chunks overlap at their seams). Individual chunk failures are tolerated —
-/// whatever data arrived is still used. When bus stops are requested,
-/// `onPartialBusStops` fires with the cumulative deduplicated stops as each
-/// chunk lands, so markers appear progressively instead of after one
-/// all-or-nothing query.
+/// The route is split into distance-based chunks, each queried by its own
+/// bounding box, at most `maxConcurrentChunkRequests` in flight, deduplicated
+/// by OSM element id (chunks overlap at their seams). A chunk that still
+/// fails after retrying is tolerated — whatever data arrived from the other
+/// chunks is still used. When bus stops are requested, `onPartialBusStops`
+/// fires with the cumulative deduplicated stops as each chunk lands, so
+/// markers appear progressively instead of after one all-or-nothing query.
 private func fetchRouteSpeedContext(
     for coordinates: [CLLocationCoordinate2D],
     includeBusStops: Bool,
     onPartialBusStops: (@Sendable ([CLLocationCoordinate2D]) -> Void)? = nil
 ) async -> RouteSpeedContext {
-    let chunks = corridorChunks(from: coordinates)
-    guard !chunks.isEmpty else { return RouteSpeedContext(ways: [], busStops: []) }
+    let bboxes = routeChunks(from: coordinates).compactMap {
+        boundingBox(for: $0, paddingMeters: OpenStreetMapSpeedLimitService.chunkBBoxPadding)
+    }
+    guard !bboxes.isEmpty else { return RouteSpeedContext(ways: [], busStops: []) }
 
     var ways: [OpenStreetMapWay] = []
     var busStops: [CLLocationCoordinate2D] = []
@@ -654,11 +709,11 @@ private func fetchRouteSpeedContext(
     var failedChunkCount = 0
 
     await withTaskGroup(of: OverpassChunkResult?.self) { group in
-        var pending = chunks.makeIterator()
+        var pending = bboxes.makeIterator()
         var inFlight = 0
         while inFlight < OpenStreetMapSpeedLimitService.maxConcurrentChunkRequests,
-              let chunk = pending.next() {
-            group.addTask { try? await fetchSpeedContextChunk(corridor: chunk, includeBusStops: includeBusStops) }
+              let bbox = pending.next() {
+            group.addTask { await fetchSpeedContextChunkWithRetry(bbox: bbox, includeBusStops: includeBusStops) }
             inFlight += 1
         }
 
@@ -667,8 +722,8 @@ private func fetchRouteSpeedContext(
                 group.cancelAll()
                 break
             }
-            if let chunk = pending.next() {
-                group.addTask { try? await fetchSpeedContextChunk(corridor: chunk, includeBusStops: includeBusStops) }
+            if let bbox = pending.next() {
+                group.addTask { await fetchSpeedContextChunkWithRetry(bbox: bbox, includeBusStops: includeBusStops) }
             }
             guard let result else {
                 failedChunkCount += 1
@@ -696,7 +751,7 @@ private func fetchRouteSpeedContext(
 
     if failedChunkCount > 0 {
         LogManager.shared.addWarningLog(
-            "Route data: \(failedChunkCount) of \(chunks.count) map-data chunks failed; continuing with partial coverage"
+            "Route data: \(failedChunkCount) of \(bboxes.count) map-data chunks failed after retrying; continuing with partial coverage"
         )
     }
 
