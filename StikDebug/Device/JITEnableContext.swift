@@ -642,8 +642,9 @@ final class JITEnableContext {
         }
     }
 
-    /// Launches an app, attaches the debugger, and *holds* the session open so the
-    /// app keeps running in the background.
+    /// Launches an app, attaches the debugger, runs the app's assigned JIT
+    /// script (if any), and *holds* the session open so the app keeps running
+    /// in the background.
     ///
     /// A debugger-owned process is not suspended by iOS when it moves to the
     /// background (the same reason an app run from Xcode keeps executing while
@@ -652,10 +653,14 @@ final class JITEnableContext {
     /// background jetsam kill. The hold runs until `cancellation` is set, then we
     /// interrupt and detach so the app continues running on its own.
     ///
+    /// - Parameter script: The same JIT-script callback the normal debug path
+    ///   uses. When present it runs once (doing its own attach + JIT enable +
+    ///   continue) before the hold begins, so scripts work in hold mode too;
+    ///   when `nil` the app is simply attached and continued.
     /// - Note: This keeps StikDebug's connection to *this* app alive; it cannot
     ///   revive an app iOS has already killed. Requires StikDebug itself to stay
     ///   running (see `DebugKeepAliveLease`).
-    func keepAppAlive(withBundleID bundleID: String, cancellation: HoldToken, logger: LogFunc?) -> Bool {
+    func keepAppAlive(withBundleID bundleID: String, script: DebugAppCallback?, cancellation: HoldToken, logger: LogFunc?) -> Bool {
         do {
             try withConnectedDebugSession { remoteServer, debugProxy in
                 let pid = try withProcessControl(remoteServer: remoteServer) { processControl in
@@ -677,7 +682,14 @@ final class JITEnableContext {
                     return Int32(truncatingIfNeeded: pid)
                 }
 
-                try holdDebugSession(pid: pid, debugProxy: debugProxy, logger: logger, cancellation: cancellation)
+                try holdDebugSession(
+                    pid: pid,
+                    debugProxy: debugProxy,
+                    remoteServer: remoteServer,
+                    script: script,
+                    logger: logger,
+                    cancellation: cancellation
+                )
             }
 
             emitLog("Keep-alive session ended for \(bundleID)", logger: logger)
@@ -688,7 +700,14 @@ final class JITEnableContext {
         }
     }
 
-    private func holdDebugSession(pid: Int32, debugProxy: OpaquePointer, logger: LogFunc?, cancellation: HoldToken) throws {
+    private func holdDebugSession(
+        pid: Int32,
+        debugProxy: OpaquePointer,
+        remoteServer: OpaquePointer,
+        script: DebugAppCallback?,
+        logger: LogFunc?,
+        cancellation: HoldToken
+    ) throws {
         debug_proxy_send_ack(debugProxy)
         debug_proxy_send_ack(debugProxy)
 
@@ -701,23 +720,47 @@ final class JITEnableContext {
 
         debug_proxy_set_ack_mode(debugProxy, 0)
 
-        let attachCommand = "vAttach;\(String(UInt32(bitPattern: pid), radix: 16))"
-        let attachResponse = try sendDebugCommand(attachCommand, debugProxy: debugProxy) ?? "<nil>"
-        emitLog("Keep-alive attach response: \(attachResponse)", logger: logger)
-
         // Keep the RSD/lockdown tunnel trusted for the whole hold.
         let heartbeat = try? connectHeartbeatKeepAlive(logger: logger)
         try? heartbeat?.start()
         defer { heartbeat?.stop() }
 
-        // Continue the (suspended-launched) process so it runs. Sent raw and not
-        // awaited: a debugger-owned, running process is not stopped by iOS when
-        // backgrounded, so there are no stop replies to drain — we just hold the
-        // connection open. Polling a flag (rather than blocking on a socket read)
-        // keeps this single-threaded and cleanly cancellable.
+        if let script {
+            // TXM / iOS 26+ JIT: the app requests executable memory at runtime via
+            // `brk #0xf00d` syscalls that the debugger must service. That is exactly
+            // what the JIT script does — it attaches (`vAttach`, enabling JIT),
+            // then loops handling those breakpoints for as long as the app uses
+            // JIT, which also keeps the app alive under the debugger the whole
+            // time. Merely attaching without running the script (the old hold
+            // behavior) left those syscalls unhandled, so the app trapped and hung
+            // on its first JIT call — the bug this fixes.
+            //
+            // The script issues its own attach/continue via `send_command`, so we
+            // must NOT send `vAttach` here (that would double-attach). It runs
+            // until the app detaches or exits; the semaphore blocks until then.
+            // StikDebug itself is held alive across this by the caller's
+            // `DebugKeepAliveLease`.
+            emitLog("Keep-alive: running JIT script (services JIT and holds the app)", logger: logger)
+            let semaphore = DispatchSemaphore(value: 0)
+            script(pid, debugProxy, remoteServer, semaphore)
+            semaphore.wait()
+            emitLog("Keep-alive: JIT script ended (app detached or exited)", logger: logger)
+            return
+        }
+
+        // No script (older devices where JIT is enabled simply by CS_DEBUGGED):
+        // attach to set CS_DEBUGGED, then continue so the app runs. Sent raw and
+        // not awaited: a debugger-owned, running process is not stopped by iOS
+        // when backgrounded, so there are no stop replies to drain — we just hold
+        // the connection open until the user stops it.
+        let attachCommand = "vAttach;\(String(UInt32(bitPattern: pid), radix: 16))"
+        let attachResponse = try sendDebugCommand(attachCommand, debugProxy: debugProxy) ?? "<nil>"
+        emitLog("Keep-alive attach response: \(attachResponse)", logger: logger)
         sendContinue(debugProxy)
         emitLog("Keep-alive: app is running and held under the debugger", logger: logger)
 
+        // Polling a flag (rather than blocking on a socket read) keeps this
+        // single-threaded and cleanly cancellable.
         while !cancellation.isCancelled {
             Thread.sleep(forTimeInterval: 0.5)
         }
