@@ -22,12 +22,18 @@ final class RunJSViewModel: ObservableObject, Identifiable, @unchecked Sendable 
     var debugProxy: OpaquePointer?
     var remoteServer: OpaquePointer?
     var semaphore: DispatchSemaphore?
-    
-    init(pid: Int, debugProxy: OpaquePointer?, remoteServer: OpaquePointer?, semaphore: DispatchSemaphore?) {
+    /// When set (background keep-alive holds), the script loop stops once this
+    /// token is cancelled. It is read only from the script's own thread — via
+    /// `should_continue()` and `send_command()` — so there is no concurrent
+    /// access to the debug proxy (which is not thread-safe).
+    var cancellation: HoldToken?
+
+    init(pid: Int, debugProxy: OpaquePointer?, remoteServer: OpaquePointer?, semaphore: DispatchSemaphore?, cancellation: HoldToken? = nil) {
         self.pid = pid
         self.debugProxy = debugProxy
         self.remoteServer = remoteServer
         self.semaphore = semaphore
+        self.cancellation = cancellation
     }
     
     func runScript(path: URL, scriptName: String? = nil) throws {
@@ -53,11 +59,11 @@ final class RunJSViewModel: ObservableObject, Identifiable, @unchecked Sendable 
                 self.context?.exception = JSValue(object: "Command should not be nil.", in: self.context!)
                 return ""
             }
-            if self.executionInterrupted {
+            if self.executionInterrupted || self.cancellation?.isCancelled == true {
                 self.context?.exception = JSValue(object: "Script execution is interrupted by StikDebug.", in: self.context!)
                 return ""
             }
-            
+
             return handleJSContextSendDebugCommand(self.context, commandStr, self.debugProxy) ?? ""
         }
         
@@ -78,7 +84,17 @@ final class RunJSViewModel: ObservableObject, Identifiable, @unchecked Sendable 
         let hasTXMFunction: @convention(block) () -> Bool = {
             return ProcessInfo.processInfo.hasTXM
         }
-        
+
+        // Lets a hold script exit cleanly when the user stops the keep-alive
+        // session. Returns false once interrupted or cancelled; scripts that
+        // loop forever (e.g. universal.js hold mode) check this each iteration.
+        // Always true for a normal one-shot JIT run (no cancellation token).
+        let shouldContinueFunction: @convention(block) () -> Bool = {
+            if self.executionInterrupted { return false }
+            if self.cancellation?.isCancelled == true { return false }
+            return true
+        }
+
         context = JSContext()
         context?.setObject(hasTXMFunction, forKeyedSubscript: "hasTXM" as NSString)
         context?.setObject(getPidFunction, forKeyedSubscript: "get_pid" as NSString)
@@ -86,7 +102,8 @@ final class RunJSViewModel: ObservableObject, Identifiable, @unchecked Sendable 
         context?.setObject(prepareMemoryRegionFunction, forKeyedSubscript: "prepare_memory_region" as NSString)
         context?.setObject(takeScreenshotFunction, forKeyedSubscript: "take_screenshot" as NSString)
         context?.setObject(logFunction, forKeyedSubscript: "log" as NSString)
-        
+        context?.setObject(shouldContinueFunction, forKeyedSubscript: "should_continue" as NSString)
+
         context?.evaluateScript(scriptContent)
         if let semaphore {
             semaphore.signal()

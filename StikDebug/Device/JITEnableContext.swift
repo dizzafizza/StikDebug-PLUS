@@ -745,6 +745,22 @@ final class JITEnableContext {
             script(pid, debugProxy, remoteServer, semaphore)
             semaphore.wait()
             emitLog("Keep-alive: JIT script ended (app detached or exited)", logger: logger)
+
+            // If the user stopped the hold (rather than the app detaching on its
+            // own), detach cleanly so the app keeps running instead of being
+            // torn down when the debug connection closes.
+            if cancellation.isCancelled {
+                var interrupt: UInt8 = 0x03
+                _ = debug_proxy_send_raw(debugProxy, &interrupt, 1)
+                usleep(100_000)
+                do {
+                    if let response = try sendDebugCommand("D", debugProxy: debugProxy) {
+                        emitLog("Keep-alive detach response: \(response)", logger: logger)
+                    }
+                } catch {
+                    emitLog(error.localizedDescription, logger: logger)
+                }
+            }
             return
         }
 

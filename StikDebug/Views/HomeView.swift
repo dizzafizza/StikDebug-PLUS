@@ -41,7 +41,14 @@ struct HomeView: View {
             } else {
                 startJITInBackground(bundleID: selectedBundle, displayName: selectedName)
             }
-        }, showDoneButton: false, onImportPairingFile: { isShowingPairingFilePicker = true })
+        }, showDoneButton: false, onImportPairingFile: { isShowingPairingFilePicker = true }, onHoldApp: { selectedBundle, selectedName in
+            // Selecting an app from the "Other" tab while keep-alive is enabled
+            // holds it in the background (and shows the banner) instead of just
+            // launching it — the same behavior as the JIT tab.
+            bundleID = selectedBundle
+            Haptics.medium()
+            startKeepAlive(bundleID: selectedBundle, displayName: selectedName)
+        })
         .overlay(alignment: .top) {
             if let activeApp = aliveManager.activeAppName {
                 keepAliveBanner(appName: activeApp)
@@ -291,17 +298,22 @@ struct HomeView: View {
             )
             return
         }
-        // Resolve the app's assigned JIT script the same way a normal JIT run
-        // does, so the script also runs in hold mode instead of only attaching.
+        // Share one cancellation token between the hold and the JIT script so
+        // that stopping the session also stops the script's loop.
+        let token = HoldToken()
+
+        // Resolve the JIT script to run in hold mode. On TXM devices this falls
+        // back to the bundled universal script for apps without an assigned or
+        // name-matched script, so keep-alive services JIT (and actively holds
+        // the debug connection) for *any* app instead of only known ones.
         var script: DebugAppCallback? = nil
-        if ProcessInfo.processInfo.hasTXM,
-           let preferred = ScriptStore.preferredScript(for: bundleID) {
-            script = getJsCallback(preferred.data, name: preferred.name)
+        if let holdScript = ScriptStore.keepAliveScript(for: bundleID) {
+            script = getJsCallback(holdScript.data, name: holdScript.name, cancellation: token)
         }
 
         let startingMessage = String(format: "Keeping %@ alive in the background".localized, name)
         AccessibilityAnnouncer.announce(startingMessage)
-        BackgroundAliveManager.shared.start(bundleID: bundleID, displayName: displayName, script: script)
+        BackgroundAliveManager.shared.start(bundleID: bundleID, displayName: displayName, script: script, token: token)
     }
 
     private func debugFeedbackView(_ feedback: DebugFeedback) -> some View {
@@ -325,12 +337,13 @@ struct HomeView: View {
         .accessibilityLabel(feedback.message)
     }
 
-    private func getJsCallback(_ script: Data, name: String? = nil) -> DebugAppCallback {
+    private func getJsCallback(_ script: Data, name: String? = nil, cancellation: HoldToken? = nil) -> DebugAppCallback {
         return { pid, debugProxyHandle, remoteServerHandle, semaphore in
             let model = RunJSViewModel(pid: Int(pid),
                                        debugProxy: debugProxyHandle,
                                        remoteServer: remoteServerHandle,
-                                       semaphore: semaphore)
+                                       semaphore: semaphore,
+                                       cancellation: cancellation)
 
             DispatchQueue.main.async {
                 scriptRunModel = model

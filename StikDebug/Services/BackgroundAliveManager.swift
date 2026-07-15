@@ -51,13 +51,16 @@ final class BackgroundAliveManager: ObservableObject {
     /// - Parameter script: Optional JIT-script callback to run once (after
     ///   attach, before the hold begins) so the app's assigned script executes
     ///   in hold mode just like it does for a normal JIT run.
-    func start(bundleID: String, displayName: String?, script: DebugAppCallback? = nil) {
+    /// - Parameter token: Cancellation token for the hold. Pass the same token
+    ///   the `script` callback was built with so that stopping the session also
+    ///   stops the script's loop; defaults to a fresh token when there is no
+    ///   script.
+    func start(bundleID: String, displayName: String?, script: DebugAppCallback? = nil, token: HoldToken = HoldToken()) {
         lock.lock()
         guard activeBundleID == nil else {
             lock.unlock()
             return
         }
-        let token = HoldToken()
         activeBundleID = bundleID
         self.token = token
         lock.unlock()
